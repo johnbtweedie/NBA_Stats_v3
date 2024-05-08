@@ -48,7 +48,7 @@ seasons = ['2012-13',
 
 df = pd.DataFrame()
 for season in seasons:
-    print(season)
+    #print(season)
     for i in range(0,len(teams_dict)):
         df = pd.concat([df, get_team_gamelog_data(i, n_games, season)], axis=0)
 
