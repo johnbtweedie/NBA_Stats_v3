@@ -3,6 +3,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import mean_squared_error, accuracy_score, confusion_matrix, classification_report, f1_score, roc_auc_score
+import joblib
 
 
 # import/process
@@ -11,6 +12,12 @@ df_feat['GAME_DATE'] = pd.to_datetime(df_feat['GAME_DATE'])
 df_feat = df_feat.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
 df_feat = df_feat.sort_index(level=['TEAM_ABBREVIATION', 'GAME_DATE'])
 
+cols = ['DaysElapsed', 'DaysRest', 'DaysRest_opp',
+        'Matchup', 'WL', 'Home', 'roadtrip', 'roadtrip_opp']
+cols_shift = [col for col in df_feat.columns if col not in cols]
+df_feat[cols_shift] = df_feat.groupby('TEAM_ABBREVIATION',
+           group_keys=False)[cols_shift].shift(1)
+df_feat = df_feat.dropna()
 
 # select features to use in model
 feature_cols = [
@@ -176,3 +183,4 @@ print("Specificity:", specificity)
 print("f1-score:", f1)
 print("roc auc score:", roc)
 
+joblib.dump(nn_model, 'nn_model.pkl')

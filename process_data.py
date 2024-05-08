@@ -56,7 +56,7 @@ cols = [ 'Win',
 df = df.sort_index(level=['GAME_DATE'], ascending=True)
 df_feat = df.groupby('TEAM_ABBREVIATION',
            group_keys=False)[cols].apply(lambda x: x.rolling(window=41,
-                                                             min_periods=1).mean().shift(1))
+                                                             min_periods=1).mean())#.shift(1)) # shifting in train models now
 # feature engineering
 
 df_feat['OER'] = df_feat['PTS_per48'] / (df_feat['FGA_per48'] +
