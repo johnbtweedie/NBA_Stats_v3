@@ -78,8 +78,7 @@ df_feat['TS%_against'] = (df_feat['PTS_per48_against'] /
 
 min_date = df_feat.index.get_level_values('GAME_DATE').min()
 df_feat['DaysElapsed'] = (df_feat.index.get_level_values('GAME_DATE') - min_date).days
-df_feat['DaysRest'] = df_feat.groupby('TEAM_ABBREVIATION',
-           group_keys=False)['DaysElapsed'].diff()
+df_feat['DaysRest'] = df_feat.groupby('TEAM_ABBREVIATION', group_keys=False)['DaysElapsed'].diff()
 df_feat['DaysRest'] = df_feat['DaysRest'].apply(lambda x: 5 if x>5 else x)
 
 # misc

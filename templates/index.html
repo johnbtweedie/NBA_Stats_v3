@@ -10,17 +10,17 @@
 <body>
     <h1>NBA Game Predictor</h1>
     <form action="/predict" method="post">
-        <label for="team1">Select Team 1:</label>
+        <label for="team1">Select Home Team:</label>
         <select name="team1" id="team1">
-            <!-- Add options for selecting team 1 dynamically -->
-            <option value="team1_id">Team 1 Name</option>
-            <!-- Repeat for all teams -->
+            {% for team in teams_list %}
+                <option value="{{ team }}">{{ team }}</option>
+            {% endfor %}
         </select>
-        <label for="team2">Select Team 2:</label>
+        <label for="team2">Select Away Team:</label>
         <select name="team2" id="team2">
-            <!-- Add options for selecting team 2 dynamically -->
-            <option value="team2_id">Team 2 Name</option>
-            <!-- Repeat for all teams -->
+            {% for team in teams_list %}
+                <option value="{{ team }}">{{ team }}</option>
+            {% endfor %}
         </select>
         <button type="submit">Predict</button>
     </form>
