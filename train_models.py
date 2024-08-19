@@ -4,19 +4,24 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import mean_squared_error, accuracy_score, confusion_matrix, classification_report, f1_score, roc_auc_score
 import joblib
+import sqlite3
 
+def load_feature_data():
+    # import/process
+    conn = sqlite3.connect('nba_database_2024-08-18.db')
+    # df_feat = pd.read_csv('features.csv')
+    df_feat = pd.read_sql('SELECT * FROM feature_table', conn)
+    df_feat['GAME_DATE'] = pd.to_datetime(df_feat['GAME_DATE'])
+    df_feat = df_feat.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
+    # df_feat = df_feat.sort_index(level=['TEAM_ABBREVIATION', 'GAME_DATE'])
+    return df_feat
 
-
-
-# import/process
-df_feat = pd.read_csv('features.csv')
-df_feat['GAME_DATE'] = pd.to_datetime(df_feat['GAME_DATE'])
-df_feat = df_feat.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
-df_feat = df_feat.sort_index(level=['TEAM_ABBREVIATION', 'GAME_DATE'])
+df_feat = load_feature_data()
 
 # fix
 cols = ['DaysElapsed', 'DaysRest', 'DaysRest_opp',
-        'Matchup', 'WL', 'Home', 'roadtrip', 'roadtrip_opp']
+        'Matchup', 'WL', 'Home', 'roadtrip', 'roadtrip_opp',
+        'MATCHUP', 'Poss_r', 'OffRat_r', 'DefRat_r', 'PTS_per48_r', 'PTS_per48_against_r', 'PTS_per48_diff_r']
 prev_matchup_cols = ['OREB_per48', 'OREB%_z', 'DREB_per48', 'DREB%_z', 'REB_per48',
                      'FGA_per48', 'FG3A_per48', 'FTA_per48',
                      'WL', 'OffRat', 'DefRat', 'OffRat_z', 'DefRat_z',

@@ -2,65 +2,70 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import time
-from nba_api.stats.static import teams
 
-# LOAD
-print('reading databse')
-conn = sqlite3.connect('nba_database_2024-07-24.db')
-# df = pd.read_csv('historical_stats.csv')
-df = pd.read_sql('SELECT * FROM formatted_data_table', conn)
-df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
-df = df.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
-df = df.sort_index(level=['TEAM_ABBREVIATION', 'GAME_DATE'])
-
-
-
-# Create a connection to the SQLite database (or create it if it doesn't exist)
-conn = sqlite3.connect('nba_database_2024-07-24.db')
-teams_dict = teams.get_teams()
-
-# grab the most recent game's date
-query = """
-SELECT MAX(GAME_DATE) as most_recent_date
-FROM feature_table
-"""
-most_recent_game_date = pd.read_sql(query, conn)
-
-df_feat_existing = pd.read_sql('SELECT * FROM feature_table', conn)
 '''
 To DO:
 [x] find most game date from features table (and?)
-[] find the index of the 5th (4th?) most recent entry of each team matchup
-[] find the furthest-back index of these
-[] use this index to grab the required data from the formatted_data_table
-[] run the feature computations on this data
+[x] find the index of the 5th (4th?) most recent entry of each team matchup
+[x] find the furthest-back index of these
+[x] use this index to grab the required data from the formatted_data_table
+[x] run the feature computations on this data
 [] merge with full  
 '''
-unique_teams = df.index.get_level_values('TEAM_ABBREVIATION').unique()
-unique_teams = unique_teams.drop('NOH')
+# LOAD
+print('reading databse')
+conn = sqlite3.connect('nba_database_2024-08-18.db')
 
-# get the past 5 games rolling average stats vs the opponent
-print('determining previous matchup stats...')
-required_retrieval_index = []
-for i, team_1 in enumerate(unique_teams):
-    print('Processing', i + 1, 'of', len(unique_teams), 'teams')
 
-    for team_2 in unique_teams[i + 1:]:
-        # #
-        # team_1 = 'ATL'
-        # team_2 = 'NOP'
-        print(team_1, 'vs.', team_2)
-        df_team_1 = df.xs(team_1, level='TEAM_ABBREVIATION', drop_level=False)
-        df_team_2 = df.xs(team_2, level='TEAM_ABBREVIATION', drop_level=False)
 
-        shared_game_ids = df_team_1.index.get_level_values(1).intersection(df_team_2.index.get_level_values(1))
+def load_required_formatted_data():
+    try:
+        df_feat_existing = pd.read_sql('SELECT * FROM feature_table', conn)
+        df_feat_existing = df_feat_existing.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
+        # df_feat_existing = df_feat_existing.sort_index(level=['GAME_ID'])
 
-        # store 5th most recent games index value
-        required_retrieval_index.append(shared_game_ids[-4])
+        unique_teams = df_feat_existing.index.get_level_values('TEAM_ABBREVIATION').unique()
+        # try:
+        #     unique_teams = unique_teams.drop('NOH')
 
-max_required_retrieval_index = pd.to_numeric(required_retrieval_index).min() # index of the least recent game we have to grab data from
+        # get the past 5 games rolling average stats vs the opponent
+        print('determining previous matchup stats...')
+        required_retrieval_index = []
+        for i, team_1 in enumerate(unique_teams):
+            print('Processing', i + 1, 'of', len(unique_teams), 'teams')
 
-def compute_features():
+            for team_2 in unique_teams[i + 1:]:
+                # #
+                # team_1 = 'ATL'
+                # team_2 = 'NOP'
+                print(team_1, 'vs.', team_2)
+                df_team_1 = df_feat_existing.xs(team_1, level='TEAM_ABBREVIATION', drop_level=False)
+                df_team_2 = df_feat_existing.xs(team_2, level='TEAM_ABBREVIATION', drop_level=False)
+
+                shared_game_ids = df_team_1.index.get_level_values(1).intersection(df_team_2.index.get_level_values(1))
+
+                # store 5th most recent games index value
+                required_retrieval_index.append(shared_game_ids[-5])
+
+        max_required_retrieval_index = pd.to_numeric(
+            required_retrieval_index).min()  # index of the least recent game we have to grab data from
+        df = pd.read_sql(
+            f"SELECT * FROM formatted_data_table WHERE CAST(GAME_ID AS INTEGER) >= {max_required_retrieval_index}",
+            conn)
+        features_exist = True
+    except:
+        print('no existing features detected, computing for full dataset')
+        df = pd.read_sql(f"SELECT * FROM formatted_data_table", conn)
+        features_exist = False
+    return df
+
+# df = load_required_formatted_data()
+df = pd.read_sql(f"SELECT * FROM formatted_data_table", conn)
+
+df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
+df = df.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
+
+def compute_features(df):
     cols = ['Win',
             'FGM',
             'FG_PCT',
@@ -106,13 +111,28 @@ def compute_features():
             'PTS_per48_against',
             ]
     print('feature engineering')
-    # rolling average for training data (shifted by 1 game)
+
+    # rolling average for training data (to be shifted by 1 game later)
     df = df.sort_index(level=['GAME_DATE'], ascending=True)
     df_feat = df.groupby('TEAM_ABBREVIATION',
                group_keys=False)[cols].apply(lambda x: x.rolling(window=41,
-                                                                 min_periods=1).mean())#.shift(1)) # shifting in train models now
-    # feature engineering
+                                                                 min_periods=41).mean())#.shift(1)) # shifting in train models now
 
+    # compute and store response features ('_r')
+    # these features will not be rolling averaged
+    # these will be used as response variables to predict
+    df_feat['Poss_r'] = (df['FGA_per48'] - df['OREB_per48'] + df['TOV_per48'] +
+                       0.4 * df['FTA_per48'])
+
+    df_feat['OffRat_r'] = df['PTS_per48'] / df_feat['Poss_r'] * 100
+    df_feat['DefRat_r'] = df['PTS_per48_against'] / df_feat['Poss_r'] * 100
+
+    df_feat['PTS_per48_r'] = df['PTS_per48']
+    df_feat['PTS_per48_against_r'] = df['PTS_per48_against']
+    df_feat['PTS_per48_diff_r'] = df_feat['PTS_per48_r'] - df_feat['PTS_per48_against_r']
+
+
+    # feature engineering
     df_feat['OER'] = df_feat['PTS_per48'] / (df_feat['FGA_per48'] +
                                              ((df_feat['FTA_per48']*0.9)/2) -
                                              df_feat['TOV_per48'])
@@ -270,8 +290,11 @@ def compute_features():
 
             shared_game_ids = df_team_1.index.get_level_values(1).intersection(df_team_2.index.get_level_values(1))
 
-            df_feat.update(df_team_1.loc[:,shared_game_ids,:][prev_matchup_cols].rolling(5).mean().shift(1).add_suffix('_prev'))
-            df_feat.update(df_team_2.loc[:,shared_game_ids,:][prev_matchup_cols].rolling(5).mean().shift(1).add_suffix('_prev'))
+            # not shifting until later
+            # df_feat.update(df_team_1.loc[:,shared_game_ids,:][prev_matchup_cols].rolling(5).mean().shift(1).add_suffix('_prev'))
+            # df_feat.update(df_team_2.loc[:,shared_game_ids,:][prev_matchup_cols].rolling(5).mean().shift(1).add_suffix('_prev'))
+            df_feat.update(df_team_1.loc[:,shared_game_ids,:][prev_matchup_cols].rolling(5).mean().add_suffix('_prev'))
+            df_feat.update(df_team_2.loc[:,shared_game_ids,:][prev_matchup_cols].rolling(5).mean().add_suffix('_prev'))
 
             # df_team_1 = df_team_1.loc[:,shared_game_ids,:]
             # df_team_2 = df_team_2.loc[:,shared_game_ids,:]
@@ -315,10 +338,14 @@ def compute_features():
             df_feat.loc[team_1_index, opp_cols] = df_team_1_opp.loc[team_1_index, opp_cols]
             df_feat.loc[team_2_index, opp_cols] = df_team_2_opp.loc[team_2_index, opp_cols]
 
-    print('saving features')
-    df_feat = df_feat.dropna()
-    # df_feat.to_csv('features.csv')
-    df_feat.to_sql('feature_table', conn, if_exists='replace', index=True)
-    conn.close()
+    return df_feat
+
+df_feat = compute_features(df)
+
+print('saving features')
+df_feat = df_feat.dropna()
+# df_feat.to_csv('features.csv')
+df_feat.to_sql('feature_table', conn, if_exists='replace', index=True)
+conn.close()
 
 print('complete')

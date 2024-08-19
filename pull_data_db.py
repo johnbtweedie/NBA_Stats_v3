@@ -6,14 +6,16 @@ from nba_api.stats.static import teams
 import time
 import sqlite3
 from datetime import datetime
+import random
 
-def get_team_gamelog_data(team_id, n_games, season, max_retries=3):
+def get_team_gamelog_data(team_id, n_games, season, max_retries=10):
     attempt = 0
     while attempt < max_retries:
         try:
             team_gamelog_data = teamgamelogs.TeamGameLogs(team_id_nullable=team_id,
                                                           season_nullable=season,
                                                           last_n_games_nullable=n_games,
+                                                          timeout=1
                                                           ).get_json()
 
             data_dict = json.loads(team_gamelog_data)
@@ -22,13 +24,14 @@ def get_team_gamelog_data(team_id, n_games, season, max_retries=3):
 
             # df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
             df['GAME_DATE'] = df['GAME_DATE'].str.split('T').str[0]
+            df['GAME_ID'] = df['GAME_ID'].astype('int')
             df = df.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
 
             return df
         except Exception as e:
             print(f"Error: {e}. Retrying...")
             attempt += 1
-            time.sleep(5)  # Wait for 5 seconds before retrying
+            time.sleep(random.randint(1, 5))  # Wait for 5 seconds before retrying
 
     print(f"Max retries ({max_retries}) reached. Couldn't fetch data.")
     return None
@@ -36,15 +39,9 @@ def get_team_gamelog_data(team_id, n_games, season, max_retries=3):
 def update_database():
 
     # Create a connection to the SQLite database (or create it if it doesn't exist)
-    conn = sqlite3.connect('nba_database_2024-07-24.db')
+    conn = sqlite3.connect('nba_database_2024-08-18.db')
     teams_dict = teams.get_teams()
 
-    # grab the most recent game's date
-    query = """
-    SELECT MAX(GAME_DATE) as most_recent_date
-    FROM formatted_data_table
-    """
-    most_recent_game_date = pd.read_sql(query, conn)
     n_games = 82
     seasons = ['2012-13',
                '2013-14',
@@ -65,24 +62,36 @@ def update_database():
                '2028-29',
                '2029-30']
 
+    # grab the most recent game's date
+    query = """
+    SELECT MAX(GAME_DATE) as most_recent_date
+    FROM formatted_data_table
+    """
+    try:
+        most_recent_game_date = pd.read_sql(query, conn)
 
-    # get string of the most recent game's year and month
-    # use these to determine which seasons needs to be updated
-    year_last_updated = most_recent_game_date.iloc[0].str.split('-').str[0].iloc[0]
-    month_last_updated = most_recent_game_date.iloc[0].str.split('-').str[1].iloc[0]
+        # get string of the most recent game's year and month
+        # use these to determine which seasons needs to be updated
+        year_last_updated = most_recent_game_date.iloc[0].str.split('-').str[0].iloc[0]
+        month_last_updated = most_recent_game_date.iloc[0].str.split('-').str[1].iloc[0]
 
-    if str(month_last_updated) == 'None':
-        month_last_updated = '1'
+        if str(month_last_updated) == 'None':
+            month_last_updated = '1'
 
-    if str(year_last_updated) == 'None':
-        year_last_updated = seasons[1].split('-')[0]
+        if str(year_last_updated) == 'None':
+            year_last_updated = seasons[1].split('-')[0]
 
-    if int(month_last_updated) >= 10:
-        season_last_updated = str(int(year_last_updated)) + '-' + str((int(year_last_updated) % 100) + 1)
-    else:
-        season_last_updated = str(int(year_last_updated) - 1) + '-' + str(int(year_last_updated) % 100)
+        if int(month_last_updated) >= 10:
+            season_last_updated = str(int(year_last_updated)) + '-' + str((int(year_last_updated) % 100) + 1)
+        else:
+            season_last_updated = str(int(year_last_updated) - 1) + '-' + str(int(year_last_updated) % 100)
 
-    position = seasons.index(season_last_updated)
+        position = seasons.index(season_last_updated)
+
+    except Exception as e:
+        # season_last_updated = '2012-13'
+        season_last_updated = seasons[0]
+        position = seasons.index(season_last_updated)
 
     if datetime.now().month >= 10:
         current_season = str(int(datetime.now().year)) + '-' + str((int(datetime.now().year) % 100) + 1)
@@ -153,8 +162,11 @@ def update_database():
         df_existing = pd.read_sql('SELECT * FROM formatted_data_table', conn)
         # df_existing.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
     except pd.io.sql.DatabaseError:
-        df_existing = pd.DataFrame(columns=df.columns)
+        print('no existing data detected')
+        columns = df.reset_index().columns.to_list()
+        df_existing = pd.DataFrame(columns=columns)
 
+    df_existing['GAME_ID'] = df_existing['GAME_ID'].astype('int')
     df_existing.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'], inplace=True)
 
     if 'level_0' in df_existing.columns:
@@ -165,22 +177,22 @@ def update_database():
     combined_data = pd.concat([df_existing, df])
     # combined_data.reset_index(inplace=True)
     # combined_data.drop('index', axis=1, inplace=True)
+    #
+    combined_data = combined_data[~combined_data.index.duplicated(keep='last')]
+    combined_data = combined_data.sort_index(level=['GAME_ID'])
     # combined_data = combined_data.sort_values(by='GAME_ID')
-    combined_data = combined_data[~combined_data.index.duplicated(keep='last')].sort_index()
-    # combined_data.reset_index(inplace=True)
-    # combined_data['GAME_DATE'] = combined_data['GAME_DATE'].dt.strftime('%Y-%m-%d')
+
+
 
     print('saving to database...')
     combined_data.to_sql('formatted_data_table', conn, if_exists='replace', index=True)
     combined_data.to_csv('historical_stats.csv')
-    # df.to_sql('formatted_data_table', conn, if_exists='replace', index=False)
 
     # df_new = pd.read_sql('SELECT * FROM formatted_data_table', conn)
     conn.close()
 
 if __name__ == '__main__':
     update_database()
-
 
 print('complete')
 print('ok')
