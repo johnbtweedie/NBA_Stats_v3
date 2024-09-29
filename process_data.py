@@ -10,7 +10,8 @@ To DO:
 [x] find the furthest-back index of these
 [x] use this index to grab the required data from the formatted_data_table
 [x] run the feature computations on this data
-[] merge with full  
+[] match opponent prev columns?
+[] merge with full
 '''
 # LOAD
 print('reading databse')
@@ -112,13 +113,13 @@ def compute_features(df):
             ]
     print('feature engineering')
 
-    # rolling average for training data (to be shifted by 1 game later)
+    # rolling average for training data (to be shifted by 1 game after getting additional response variables)
     df = df.sort_index(level=['GAME_DATE'], ascending=True)
     df_feat = df.groupby('TEAM_ABBREVIATION',
                group_keys=False)[cols].apply(lambda x: x.rolling(window=41,
-                                                                 min_periods=41).mean())#.shift(1)) # shifting in train models now
+                                                                 min_periods=41).mean())
 
-    # compute and store response features ('_r')
+    # compute and store additional response features ('_r')
     # these features will not be rolling averaged
     # these will be used as response variables to predict
     df_feat['Poss_r'] = (df['FGA_per48'] - df['OREB_per48'] + df['TOV_per48'] +
@@ -133,6 +134,7 @@ def compute_features(df):
 
 
     # feature engineering
+    df_feat[cols] = df_feat[cols].shift(1) # now shift by one game
     df_feat['OER'] = df_feat['PTS_per48'] / (df_feat['FGA_per48'] +
                                              ((df_feat['FTA_per48']*0.9)/2) -
                                              df_feat['TOV_per48'])
@@ -269,11 +271,14 @@ def compute_features(df):
             df_feat[prev_col] = np.nan
 
     opp_cols = []
-    for col in cols:
+    for col in (cols + prev_matchup_cols):
         opp_col = col + '_opp'
-        opp_cols.append(opp_col)
-        df_feat[opp_col] = np.nan
+        if opp_col != 'WL_opp':
+            opp_cols.append(opp_col)
+            df_feat[opp_col] = np.nan
 
+    opp_cols = list(set(opp_cols))
+    cols =  list(set(cols))
     unique_teams = df_feat.index.get_level_values('TEAM_ABBREVIATION').unique()
 
     # get the past 5 games rolling average stats vs the opponent
