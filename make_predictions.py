@@ -106,7 +106,7 @@ def reprocess_holdout_data(df_feat, pca_used):
     X_holdout = pd.DataFrame(scaler.transform(X_holdout), index=y_holdout.index)
 
     if pca_used == 'Yes':
-        pca = PCA(n_components=n_components)
+        pca = PCA(n_components=n_components) # need to save transformer from model fitting
     else:
         cov_matrix = np.cov(X_train.T)
         eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
@@ -158,6 +158,60 @@ def load_or_process_data(file_path='holdout_data.pkl', pca_used=pca_used,):
         #     pickle.dump(data, f)
 
     return response_cols, data
+
+def load_required_data_for_any_matchup_prediction():
+    '''
+    funciton loads and processes the necessary data in order to make any matchup prediction
+    '''
+    conn = sqlite3.connect('nba_database_2024-08-18.db')
+
+    df_feat_existing = pd.read_sql('SELECT * FROM feature_table', conn)
+    df_feat_existing = df_feat_existing.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
+
+    unique_teams = df_feat_existing.index.get_level_values('TEAM_ABBREVIATION').unique()
+    # try:
+    #     unique_teams = unique_teams.drop('NOH')
+
+    # get the past 5 games rolling average stats vs the opponent
+    print('determining previous matchup stats...')
+    required_retrieval_index = []
+    for i, team_1 in enumerate(unique_teams):
+        print('Processing', i + 1, 'of', len(unique_teams), 'teams')
+
+        for team_2 in unique_teams[i + 1:]:
+            # #
+            # team_1 = 'ATL'
+            # team_2 = 'NOP'
+            print(team_1, 'vs.', team_2)
+            df_team_1 = df_feat_existing.xs(team_1, level='TEAM_ABBREVIATION', drop_level=False)
+            df_team_2 = df_feat_existing.xs(team_2, level='TEAM_ABBREVIATION', drop_level=False)
+
+            shared_game_ids = df_team_1.index.get_level_values(1).intersection(df_team_2.index.get_level_values(1))
+
+            # store 5th most recent games index value
+            required_retrieval_index.append(shared_game_ids[-1])
+
+    max_required_retrieval_index = pd.to_numeric(
+        required_retrieval_index).min()  # index of the least recent game we have to grab data from
+    df = pd.read_sql(
+        f"SELECT * FROM feature_table WHERE CAST(GAME_ID AS INTEGER) >= {max_required_retrieval_index}",
+        conn)
+    df['opponent'] = df.groupby('GAME_ID')['TEAM_ABBREVIATION'].transform(lambda x: x[::-1].values)
+    prev_columns = [col for col in df.columns if '_prev' in col]
+    previous_matchup_dict = {}
+    # get a dictionary of dictionaries containing each teams current stats, and their 'prev' stats against all possible opponents
+    for team in unique_teams:
+        df_team = df.loc[df['TEAM_ABBREVIATION'] == team]
+        team_stats_for_each_opponent_dict = {}
+        for opponent in df_team['opponent'].unique():
+            df_opponent = df_team.loc[df_team['opponent'] == opponent, prev_columns].iloc[-1]  # iloc[-1] in case of duplicates
+            team_stats_for_each_opponent_dict[opponent] = df_team[prev_columns].iloc[-1]
+        team_stats_for_each_opponent_dict[team] = df_opponent
+        previous_matchup_dict[team] = team_stats_for_each_opponent_dict
+
+    return df, previous_matchup_dict
+
+df, previous_matchup_dict = load_required_data_for_any_matchup_prediction()
 
 
 # Example usage

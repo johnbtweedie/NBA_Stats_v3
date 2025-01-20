@@ -39,7 +39,7 @@ def get_team_gamelog_data(team_id, n_games, season, max_retries=10):
 def update_database():
 
     # Create a connection to the SQLite database (or create it if it doesn't exist)
-    conn = sqlite3.connect('nba_database_2024-08-18.db')
+    conn = sqlite3.connect('nba_database_2025-01-18.db')
     teams_dict = teams.get_teams()
 
     n_games = 82
