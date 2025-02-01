@@ -3,50 +3,6 @@ import numpy as np
 import sqlite3
 import time
 
-
-# print('reading databse')
-# conn = sqlite3.connect('nba_database_2024-08-18.db')
-# def load_required_formatted_data():
-#     try:
-#         df_feat_existing = pd.read_sql('SELECT * FROM feature_table', conn)
-#         df_feat_existing = df_feat_existing.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
-#         # df_feat_existing = df_feat_existing.sort_index(level=['GAME_ID'])
-
-#         unique_teams = df_feat_existing.index.get_level_values('TEAM_ABBREVIATION').unique()
-#         # try:
-#         #     unique_teams = unique_teams.drop('NOH')
-
-#         # get the past 6 games rolling average stats vs the opponent
-#         print('determining previous matchup stats...')
-#         required_retrieval_index = []
-#         for i, team_1 in enumerate(unique_teams):
-#             print('Processing', i + 1, 'of', len(unique_teams), 'teams')
-
-#             for team_2 in unique_teams[i + 1:]:
-#                 # #
-#                 # team_1 = 'ATL'
-#                 # team_2 = 'NOP'
-#                 print(team_1, 'vs.', team_2)
-#                 df_team_1 = df_feat_existing.xs(team_1, level='TEAM_ABBREVIATION', drop_level=False)
-#                 df_team_2 = df_feat_existing.xs(team_2, level='TEAM_ABBREVIATION', drop_level=False)
-
-#                 shared_game_ids = df_team_1.index.get_level_values(1).intersection(df_team_2.index.get_level_values(1))
-
-#                 # store 6th most recent games index value
-#                 required_retrieval_index.append(shared_game_ids[-6])
-
-#         max_required_retrieval_index = pd.to_numeric(
-#             required_retrieval_index).min()  # index of the least recent game we have to grab data from
-#         df = pd.read_sql(
-#             f"SELECT * FROM formatted_data_table WHERE CAST(GAME_ID AS INTEGER) >= {max_required_retrieval_index}",
-#             conn)
-#         features_exist = True
-#     except:
-#         print('no existing features detected, computing for full dataset')
-#         df = pd.read_sql(f"SELECT * FROM formatted_data_table", conn)
-#         features_exist = False
-#     return df
-
 class ComputeFeatures:
     def __init__(self, conn, purpose='train', refresh=False):
         
@@ -485,14 +441,14 @@ class ComputeFeatures:
         # df_current = df_current.groupby(level='TEAM_ABBREVIATION').tail(1)
         
         df_current = df.groupby(level='TEAM_ABBREVIATION').tail(1)
-        df_current.to_sql('current_team_data', self.conn, if_exists='replace', index=False)
+        df_current.to_sql('current_team_data', self.conn, if_exists='replace', index=True)
 
         # get most recent prev stats for all teams and their opponents
         df_prev = df.loc[:,df.columns.str.contains('_prev|oppAbv')]
         df_prev = (
             df_prev.groupby(['TEAM_ABBREVIATION', 'oppAbv']).tail(1)
         )
-        df_prev.to_sql('prev_team_data', self.conn, if_exists='replace', index=False)
+        df_prev.to_sql('prev_team_data', self.conn, if_exists='replace', index=True)
 
         # Home and roadtrip are not applicable to current night predictions, we must determine this at that stage
         print('...complete')
@@ -637,7 +593,6 @@ class ComputeFeatures:
 
                 print('..complete')
             
-# df = load_required_formatted_data()
 all_features = ComputeFeatures(conn=sqlite3.connect('nba_database_2025-01-18.db'), 
                                purpose='predict',
                                refresh=True)
