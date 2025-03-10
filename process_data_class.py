@@ -2,9 +2,12 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import time
+from tqdm import tqdm
+from statsmodels.tsa.arima.model import ARIMA
+from itertools import product
 
 class ComputeFeatures:
-    def __init__(self, conn, purpose='train', refresh=False):
+    def __init__(self, conn, purpose='train', refresh=False, tune_rolling_avg=False):
         
         # establish columns for various processing steps
         # ra - columns to perform rolling average on
@@ -87,30 +90,35 @@ class ComputeFeatures:
             print('data loaded')
         self.refresh = refresh
         
+        
         # process the data to create features
-        # if purpose is predict, we do not shift the games by one
-        if purpose == 'train':
-            self.store_response_vars()
-            self.compute_features()
-            self.leaguewide_standardization()
-            self.previous_games_vs_opponent()
-            self.compute_rolling_avg()
-            self.shift_observations()
-            self.match_opponent_stats()
-            self.save_features()
-        elif purpose == 'predict':
-            self.store_response_vars()
-            self.compute_features()
-            self.leaguewide_standardization()
-            self.previous_games_vs_opponent()
-            self.compute_rolling_avg()
-            self.save_current_observations()
-            self.shift_observations()
-            self.match_opponent_stats()
-            self.save_features()
-           
-        else:
-            print('error: please specify "train" or "predict" for purpose arg')
+        self.store_response_vars()
+        self.compute_features()
+        self.leaguewide_standardization()
+        self.previous_games_vs_opponent()
+        # if tune_rolling_avg:
+        #     self.tune_rolling_avg()
+        # self.features = pd.read_csv('self_features_pre_rolling_avg.csv')
+        self.features = self.get_opponent_abv(self.features)
+        # self.features = self.features.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
+        
+        # compute and save exogenous features for time series model
+        self.exog_features = self.compute_rolling_avg(self.features, features='exog')
+        self.exog_features = self.shift_observations(self.exog_features)
+        self.exog_features = self.match_opponent_stats(self.exog_features) # not working for exog features? cehck
+
+        # self.save_features()
+
+        # # original
+        # self.store_response_vars()
+        # self.compute_features()
+        # self.leaguewide_standardization()
+        # self.previous_games_vs_opponent()
+        self.features = self.compute_rolling_avg(df=self.features)
+        self.save_current_observations()
+        self.features = self.shift_observations(self.features)
+        self.features = self.match_opponent_stats(self.features)
+        self.save_features()
 
         print('features computed')
 
@@ -177,6 +185,21 @@ class ComputeFeatures:
 
         return df
     
+    def get_opponent_abv(self, df):
+        '''
+        get abbreviation of the opponent
+        '''
+        df['TEAM_ABBREVIATION_TEMP'] = df.index.get_level_values('TEAM_ABBREVIATION')
+
+        df['oppAbv'] = (
+            df.groupby('GAME_ID')['TEAM_ABBREVIATION_TEMP']
+            .transform(lambda x: x[::-1].values)
+        )
+        
+        df.drop(columns=['TEAM_ABBREVIATION_TEMP'], inplace=True)
+
+        return df
+
     def store_response_vars(self):
         '''
         compute and store additional response features ('_r')
@@ -388,25 +411,66 @@ class ComputeFeatures:
         self.features = df_feat
         # return df_feat
     
-    def compute_rolling_avg(self, window=41):
-        '''
-        compute [window]-game rolling average for all teams for [cols] columns
-        '''
-
-        # rolling average for training data (to be shifted by 1 game after getting additional response variables)
+    def tune_rolling_avg(self):
         df = self.features
         df = df.sort_index()
-        list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed']
-        list_of_cols_to_exclude.extend([col for col in df.columns if '_prev' in col])
+        print('tuning rolling average')
+        # Define parameter grid
+        p_values = [0, 1, 6, 20]
+        d_values = [0, 1, 2, 5]
+        q_values = [0, 1, 10, 40]
+        param_grid = list(product(p_values, d_values, q_values))
 
-        # old method
-        # df = df.groupby('TEAM_ABBREVIATION',
-        #         group_keys=False)[df.columns.difference(list_of_cols_to_exclude)].apply(lambda x: x.rolling(window=window,
-        #                                                             min_periods=window).mean())
+        best_params = None
+        best_error = float('inf')
 
-        # Columns to apply the transformation
-        cols_to_transform = df.columns.difference(list_of_cols_to_exclude)
-        # self.ra_cols = cols_to_transform
+        # Iterate over all (p,d,q) combinations
+        for p, d, q in param_grid:
+            total_error = 0
+            num_teams = 0
+
+            for team, group in df.groupby('TEAM_ABBREVIATION', group_keys=False):
+                try:
+                    # Convert index to datetime if necessary
+                    group = group.copy()
+                    if not isinstance(group.index, pd.DatetimeIndex):
+                        group.index = pd.to_datetime(group.index, errors='coerce')  # Ensure datetime format
+                    
+                    model = ARIMA(group['DefRat'], order=(p, d, q)).fit()
+                    forecast = model.forecast()
+                    residual_error = np.abs(group['DefRat'].iloc[-1] - forecast.iloc[0])
+                    total_error += residual_error
+                    num_teams += 1
+                except Exception as e:
+                    continue  # Skip if model fails
+
+            avg_error = total_error / num_teams if num_teams > 0 else float('inf')
+
+            if avg_error < best_error:
+                best_error = avg_error
+                best_params = (p, d, q)
+
+        print(f"Best ARIMA parameters: {best_params} with average residual error: {best_error}")
+        # return best_params
+    
+    def compute_rolling_avg(self, df, features=None, window=41):
+        '''
+        compute [window]-game rolling average for all teams for [features] columns
+        '''
+        df = df.sort_index()
+        list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed', 'oppAbv']
+        if features == None:
+            # default set of columns to exclude from rolling average - all besides previous matchup games
+            list_of_cols_to_exclude.extend([col for col in df.columns if '_prev' in col])
+            cols_to_transform = df.columns.difference(list_of_cols_to_exclude)
+        elif features == 'exog':
+            # exogenous features rolling average
+            # define the exogenous (opponent) features for the time series model below
+            cols_to_transform = ['OER', 'DER', 'eFG%', 'eFG%_against', 'TS%', 'TS%_against',	
+                                 'DaysElapsed', 'DaysRest', 'WL', 'Home', 'roadtrip', 'Poss', 'OffRat', 'DefRat',	
+                                 'OREB%', 'DREB%', 'TOV%', 'TOV_forced%', 'STL%', 'AST%', 'BB%']
+        else:
+            raise KeyError("Pass a valid feature set command")
         
         # Apply the transformation only to the specified columns
         df_transformed = (
@@ -414,11 +478,17 @@ class ComputeFeatures:
             .apply(lambda group: group[cols_to_transform].rolling(window=window, min_periods=window).mean())
         )
 
+        if features == 'exog':
+            df_transformed = df_transformed[cols_to_transform].add_suffix('_exog')
         # Keep the excluded columns intact
-        df_excluded = df[list_of_cols_to_exclude]
-
+        if 'oppAbv' in df.columns:
+            df_excluded = df[list_of_cols_to_exclude]
+        else:
+            list_of_cols_to_exclude.remove('oppAbv')
+            df_excluded = df[list_of_cols_to_exclude]
+        
         # Combine the transformed and excluded columns
-        self.features = pd.concat([df_excluded, df_transformed], axis=1)
+        return pd.concat([df_excluded, df_transformed], axis=1)
     
     def save_current_observations(self):
         '''
@@ -427,13 +497,13 @@ class ComputeFeatures:
         print('storing data for current predictions...')
 
         # generate column for opponents abbreviation
-        df = self.features.reset_index()
-        df['oppAbv'] = (
-            df.groupby('GAME_ID')['TEAM_ABBREVIATION']
-            .transform(lambda x: x[::-1].values)
-        )
-        df = df.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
-        self.features = df
+        df = self.features#.reset_index()
+        # df['oppAbv'] = (
+        #     df.groupby('GAME_ID')['TEAM_ABBREVIATION']
+        #     .transform(lambda x: x[::-1].values)
+        # )
+        # df = df.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
+        # self.features = df
         
         # groupby teams and get their current stats
         # includes their home/away status, roadtrip status, days of rest, and the rolling averages of the stats (including the most recent game played)
@@ -453,19 +523,24 @@ class ComputeFeatures:
         # Home and roadtrip are not applicable to current night predictions, we must determine this at that stage
         print('...complete')
     
-    def shift_observations(self):
+    def shift_observations(self, df):
         '''
         shift befiore or after opponent matching????
         '''
         print('shifting features by one game...')
-        df = self.features
+        # df = self.features
 
-        # group by teams, shift original features,  '_z' features,
-        df_shift_by_team = df[self.ra_cols]
+        # group by teams, shift features by one game
+        df_shift_by_team = df.sort_index()
+        list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed', 'oppAbv']
+        list_of_cols_to_exclude.extend([col for col in df.columns if '_prev' in col])
+
+        # Columns to apply the transformation
+        cols_to_transform = df.columns.difference(list_of_cols_to_exclude)
         
         df_shift_by_team = (
             df_shift_by_team.groupby(['TEAM_ABBREVIATION'], group_keys=False)
-            .apply(lambda group: group[self.ra_cols].shift(1))
+            .apply(lambda group: group[cols_to_transform].shift(1))
         )
         
         # group by teams and each unique opponent, shift '_prev' and by 1
@@ -477,13 +552,14 @@ class ComputeFeatures:
         df.update(df_shift_by_team)
         df.update(df_shift_by_team_opp)
 
-        self.features = df
+        # self.features = df
         print('...complete')
-
-    def match_opponent_stats(self):
+        return df
+    
+    def match_opponent_stats(self, df_feat):
         
         # df_feat = self.features[25000:] #debug
-        df_feat = self.features.dropna().sort_index()
+        # df_feat = self.features.dropna().sort_index()
         # cols = self.ra_cols.to_list()
         # prev_matchup_cols = self.prev_cols#[col for col in df_feat.columns if '_prev' in col]
 
@@ -493,46 +569,58 @@ class ComputeFeatures:
         # # each team should
         # df_feat = df_feat.loc[(slice(None), slice(self.cutoff_index_for_saving-2460, None), slice(None))]
 
+        df_feat = df_feat.dropna().sort_index()
 
-        cols = self.features.columns.to_list()
+        cols = df_feat.columns.to_list()
         opp_cols = []
-        
-        # for col in (cols + prev_matchup_cols)
-        for col in cols:
+
+        for col in tqdm(cols, desc="Processing columns"):
             opp_col = col + '_opp'
-            if opp_col != 'WL_opp':
+            if opp_col not in {'WL_opp', 'oppAbv_opp'}:
                 opp_cols.append(opp_col)
                 df_feat[opp_col] = np.nan
+                df_feat[opp_col] = (
+                    df_feat[col].groupby('GAME_ID')
+                    .transform(lambda x: x[::-1].values)
+                )
 
-        opp_cols = list(set(opp_cols))
 
-        unique_teams = df_feat.index.get_level_values('TEAM_ABBREVIATION').unique()
+        # opp_cols = list(set(opp_cols))
 
-        # match opponent stats
-        print('matching opponent stats...')
-        for i, team_1 in enumerate(unique_teams):
-            print('processing ', i + 1, ' of ', len(unique_teams), ' teams')
-            for team_2 in unique_teams[i + 1:]:
-                print(team_1, ' vs. ', team_2)
+        # unique_teams = df_feat.index.get_level_values('TEAM_ABBREVIATION').unique()
+        
 
-                # get dataframe of each teams features/stats
-                df_team_1 = df_feat.xs(team_1, level='TEAM_ABBREVIATION', drop_level=False)[cols]
-                df_team_2 = df_feat.xs(team_2, level='TEAM_ABBREVIATION', drop_level=False)[cols]
+        # # match opponent stats
+        # print('matching opponent stats...')
+        # for i, team_1 in enumerate(unique_teams):
+        #     print('processing ', i + 1, ' of ', len(unique_teams), ' teams')
+        #     for team_2 in unique_teams[i + 1:]:
+        #         print(team_1, ' vs. ', team_2)
 
-                shared_game_ids = df_team_1.index.get_level_values(1).intersection(df_team_2.index.get_level_values(1))
+        #         # get dataframe of each teams features/stats
+        #         df_team_1 = df_feat.xs(team_1, level='TEAM_ABBREVIATION', drop_level=False)[cols]
+        #         df_team_2 = df_feat.xs(team_2, level='TEAM_ABBREVIATION', drop_level=False)[cols]
 
-                df_team_1 = df_team_1.loc[:,shared_game_ids,:]
-                df_team_2 = df_team_2.loc[:,shared_game_ids,:]
+        #         # find shared game ids
+        #         shared_game_ids = df_team_1.index.get_level_values(1).intersection(df_team_2.index.get_level_values(1))
 
-                df_team_1_opp = df_team_2.add_suffix('_opp')
-                df_team_2_opp = df_team_1.add_suffix('_opp')
+        #         # truncate each dataframe to the shared game ids
+        #         df_team_1 = df_team_1.loc[:,shared_game_ids,:]
+        #         df_team_2 = df_team_2.loc[:,shared_game_ids,:]
 
-                team_1_index = df_team_1_opp.index.intersection(df_feat.index)
-                team_2_index = df_team_2_opp.index.intersection(df_feat.index)
+                
+        #         df_team_1_opp = df_team_2.add_suffix('_opp')
+        #         df_team_2_opp = df_team_1.add_suffix('_opp')
+                
+        #         # ------------------------------------------------------------------------
+        #         ''' this section needs to be fixed'''
+        #         team_1_index = df_team_1_opp.index.intersection(df_feat.index)
+        #         team_2_index = df_team_2_opp.index.intersection(df_feat.index) 
 
-                df_feat.loc[team_1_index, opp_cols] = df_team_1_opp.loc[team_1_index, opp_cols]
-                df_feat.loc[team_2_index, opp_cols] = df_team_2_opp.loc[team_2_index, opp_cols]
-                print('complete')
+        #         df_feat.loc[team_1_index, opp_cols] = df_team_1_opp.loc[team_1_index, opp_cols]
+        #         df_feat.loc[team_2_index, opp_cols] = df_team_2_opp.loc[team_2_index, opp_cols]
+        #         #########------------------------------------------------#######
+        #         print('complete')
 
         # Find the index of the last row with missing values
         last_missing_idx = df_feat[df_feat.isnull().any(axis=1)].index.max()
@@ -543,7 +631,7 @@ class ComputeFeatures:
         # Optionally, drop the row with missing values if you don't want it in the result
         df_feat_truncated = df_feat_truncated.dropna()
 
-        self.features = df_feat_truncated
+        return df_feat_truncated
 
     def save_features(self, db_table_name='feature_table'):
         if self.refresh:

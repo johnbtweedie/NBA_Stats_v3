@@ -210,11 +210,11 @@ class assembleClassificationModel:
 
     def train_classification_models(self):
         self.models = {}
-        # self.tune_model_rf()
+        self.tune_model_rf()
         self.tune_model_logit()
         # self.tune_model_svm()
-        # self.tune_model_nnet()
-        # self.tune_model_gradient_boost()
+        self.tune_model_nnet()
+        self.tune_model_gradient_boost()
         self.save_best_models()
 
     def tune_model_nnet(self):

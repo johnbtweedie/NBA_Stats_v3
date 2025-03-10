@@ -20,7 +20,7 @@ class AssembleModels:
 
     def __init__(self, best_models_path):
         self.models = self.load_models(best_models_path) # load the model dictionary
-        self.data_dict = self.load_data_dict()
+        self.data_dict = self.models['data']#self.load_data_dict()
         self.compiled_probs_hold = self.compile_probabilities()
         self.compiled_probs_test = self.compile_probabilities(holdout=False)
         self.train_gradient_boosting()
@@ -35,14 +35,14 @@ class AssembleModels:
         print('...complete')
         return model_dict
     
-    def load_data_dict(self, data_dict_path='data_2025-01-25_19-11-52.pkl'):
-        '''
-        load data dictionary from pickle file
-        '''
-        print('loading data dict file...')
-        data_dict = joblib.load(data_dict_path)
-        print('...complete')
-        return data_dict
+    # def load_data_dict(self, data_dict_path='data_2025-01-25_19-11-52.pkl'):
+    #     '''
+    #     load data dictionary from pickle file
+    #     '''
+    #     print('loading data dict file...')
+    #     data_dict = joblib.load(data_dict_path)
+    #     print('...complete')
+    #     return data_dict
     
     def compile_probabilities(self, holdout=True):
         '''
@@ -327,10 +327,9 @@ def make_predictions(games, features, models):
         
 
 
-
 if __name__ == '__main__':
             # AssembleModels(best_models_path='best_models_2025-01-25_14-44-24.pkl')
-            models = AssembleModels(best_models_path='best_models_2025-01-28_23-54-24.pkl')
+            models = AssembleModels(best_models_path='best_models_2025-02-02_13-11-00.pkl')
             
             feature_list = models.models['data']['features']
 
@@ -339,7 +338,11 @@ if __name__ == '__main__':
                 1 : {'home' : 'OKC',
                      'away' : 'TOR'},
                 2 : {'home' : 'OKC',
-                     'away' : 'WAS'}
+                     'away' : 'WAS'},
+                3 : {'home' : 'OKC',
+                     'away' : 'TOR'},
+                4 : {'home' : 'OKC',
+                     'away' : 'TOR'},
             }
             
             features = AssembleFeatures().assemble_game_features(feature_list, games, models)
