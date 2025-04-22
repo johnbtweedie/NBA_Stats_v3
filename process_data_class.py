@@ -5,6 +5,7 @@ import time
 from tqdm import tqdm
 from statsmodels.tsa.arima.model import ARIMA
 from itertools import product
+# import warnings
 
 class ComputeFeatures:
     def __init__(self, conn, purpose='train', refresh=False, tune_rolling_avg=False):
@@ -92,29 +93,24 @@ class ComputeFeatures:
         
         
         # process the data to create features
-        self.store_response_vars()
-        self.compute_features()
-        self.leaguewide_standardization()
-        self.previous_games_vs_opponent()
-        # if tune_rolling_avg:
-        #     self.tune_rolling_avg()
-        # self.features = pd.read_csv('self_features_pre_rolling_avg.csv')
-        self.features = self.get_opponent_abv(self.features)
-        # self.features = self.features.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
-        
-        # compute and save exogenous features for time series model
-        self.exog_features = self.compute_rolling_avg(self.features, features='exog')
-        self.exog_features = self.shift_observations(self.exog_features)
-        self.exog_features = self.match_opponent_stats(self.exog_features) # not working for exog features? cehck
-
-        # self.save_features()
-
-        # # original
         # self.store_response_vars()
         # self.compute_features()
         # self.leaguewide_standardization()
         # self.previous_games_vs_opponent()
-        self.features = self.compute_rolling_avg(df=self.features)
+        # self.features = self.get_opponent_abv(self.features)
+        # self.features.to_csv('regular_features_no_rolling.csv')
+
+        # self.exog_features = self.compute_rolling_avg_exog(self.features)
+        # self.exog_features = self.shift_observations(self.exog_features)
+        # self.exog_features = self.match_opponent_stats(self.exog_features) # not working for exog features? cehck
+        # self.exog_features.to_csv('exog_features.csv')
+        
+        self.features = pd.read_csv('regular_features_no_rolling.csv')
+        self.features = self.compute_rolling_avg_optimal(df=self.features)
+        self.features = self.compute_rolling_avg(df=self.features, window=8)
+        self.features = self.compute_rolling_avg(df=self.features, window=16)
+        self.features = self.compute_rolling_avg(df=self.features, window=32)
+        self.features = self.compute_dfm(df=self.features)
         self.save_current_observations()
         self.features = self.shift_observations(self.features)
         self.features = self.match_opponent_stats(self.features)
@@ -453,24 +449,23 @@ class ComputeFeatures:
         print(f"Best ARIMA parameters: {best_params} with average residual error: {best_error}")
         # return best_params
     
-    def compute_rolling_avg(self, df, features=None, window=41):
+    def compute_rolling_avg_exog(self, df, window=41):
         '''
-        compute [window]-game rolling average for all teams for [features] columns
+        compute [window]-game rolling average for all teams for exogenous features
+        this is passed to the rolling average tuning script
         '''
         df = df.sort_index()
         list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed', 'oppAbv']
-        if features == None:
-            # default set of columns to exclude from rolling average - all besides previous matchup games
-            list_of_cols_to_exclude.extend([col for col in df.columns if '_prev' in col])
-            cols_to_transform = df.columns.difference(list_of_cols_to_exclude)
-        elif features == 'exog':
-            # exogenous features rolling average
-            # define the exogenous (opponent) features for the time series model below
-            cols_to_transform = ['OER', 'DER', 'eFG%', 'eFG%_against', 'TS%', 'TS%_against',	
-                                 'DaysElapsed', 'DaysRest', 'WL', 'Home', 'roadtrip', 'Poss', 'OffRat', 'DefRat',	
-                                 'OREB%', 'DREB%', 'TOV%', 'TOV_forced%', 'STL%', 'AST%', 'BB%']
-        else:
-            raise KeyError("Pass a valid feature set command")
+        
+        # exogenous features rolling average
+        # define the exogenous (opponent) features for the time series model below
+        cols_to_transform = ['OER', 'DER', 'eFG%', 'eFG%_against', 'TS%', 'TS%_against',	
+                                'DaysElapsed', 'DaysRest', 'WL', 'Poss', 'OffRat', 'DefRat',	
+                                'OREB%', 'DREB%', 'TOV%', 'TOV_forced%', 'STL%', 'AST%', 'BB%',
+                                'eFG%_z', 'eFG%_against_z', 'TS%_z', 'TS%_against_z',	
+                                'Poss_z', 'OffRat_z', 'DefRat_z',	#'Home', 'roadtrip',
+                                'OREB%_z', 'DREB%_z', 'TOV%_z', 'TOV_forced%_z', 'STL%_z', 'AST%_z']
+
         
         # Apply the transformation only to the specified columns
         df_transformed = (
@@ -478,8 +473,8 @@ class ComputeFeatures:
             .apply(lambda group: group[cols_to_transform].rolling(window=window, min_periods=window).mean())
         )
 
-        if features == 'exog':
-            df_transformed = df_transformed[cols_to_transform].add_suffix('_exog')
+        df_transformed = df_transformed[cols_to_transform].add_suffix('_exog')
+        
         # Keep the excluded columns intact
         if 'oppAbv' in df.columns:
             df_excluded = df[list_of_cols_to_exclude]
@@ -490,6 +485,70 @@ class ComputeFeatures:
         # Combine the transformed and excluded columns
         return pd.concat([df_excluded, df_transformed], axis=1)
     
+    def compute_rolling_avg_optimal(self, df):
+        '''
+        compute [window]-game rolling average for all teams for [features] columns
+        '''
+        df = df.sort_index()
+        list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed', 'oppAbv']
+        list_of_cols_to_exclude.extend([col for col in df.columns if '_prev' in col])
+        cols_to_transform = df.columns.difference(list_of_cols_to_exclude)
+
+
+        # compute optimal window rolling averages
+        optimal_windows = pd.read_csv(r'catalogs/parameters/rolling_average_windows.csv', index_col=0)
+        for feature, window in optimal_windows.iterrows():
+            window = int(window.values[0])
+            print(feature, window)
+            
+            if not feature in list_of_cols_to_exclude:
+                # Apply the transformation only to the specified columns
+                df_transformed = (
+                    df.groupby('TEAM_ABBREVIATION', group_keys=False)
+                    .apply(lambda group: group[feature].rolling(window=window, min_periods=window).mean())
+                )
+
+                new_label = feature + '_raop'
+                df[new_label] = df_transformed
+        
+        return df
+        
+    def compute_rolling_avg(self, df, features=None, window=None):
+        '''
+        compute [window]-game rolling average for all teams for [features] columns
+        '''
+        df = df.sort_index()
+        list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed', 'oppAbv', 'GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION']
+        list_of_cols_to_exclude.extend([col for col in df.columns if '_prev' in col])
+        list_of_cols_to_exclude.extend([col for col in df.columns if '_ra' in col])
+        cols_to_transform = df.columns.difference(list_of_cols_to_exclude)
+        
+        # Apply the transformation only to the specified columns
+        df_transformed = (
+            df.groupby('TEAM_ABBREVIATION', group_keys=False)
+            .apply(lambda group: group[cols_to_transform].rolling(window=window, min_periods=window).mean())
+        )
+        new_label = '_ra' +str(window)
+        df_transformed = df_transformed[cols_to_transform].add_suffix(new_label)
+
+        # # Keep the excluded columns intact
+        # if 'oppAbv' in df.columns:
+        #     df_excluded = df[list_of_cols_to_exclude]
+        # else:
+        #     list_of_cols_to_exclude.remove('oppAbv')
+        #     df_excluded = df[list_of_cols_to_exclude]
+        
+        # Combine the transformed and excluded columns
+        return pd.concat([df, df_transformed], axis=1)
+    
+    def compute_dfm(self, df):
+        '''
+        apply the fitted DFM time series models to relevant feature columns
+        '''
+        df = df.sort_index()
+
+        return df
+
     def save_current_observations(self):
         '''
         store the unshifted observations to use in next game predictions

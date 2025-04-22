@@ -195,4 +195,3 @@ if __name__ == '__main__':
     update_database()
 
 print('complete')
-print('ok')
