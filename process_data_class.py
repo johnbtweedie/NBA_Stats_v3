@@ -7,7 +7,9 @@ from statsmodels.tsa.arima.model import ARIMA
 from itertools import product
 import pickle
 import statsmodels.api as sm
-# import warnings
+import warnings
+
+warnings.filterwarnings('ignore')
 
 class ComputeFeatures:
     def __init__(self, conn, purpose='train', refresh=False, tune_rolling_avg=False):
@@ -93,22 +95,21 @@ class ComputeFeatures:
             print('data loaded')
         self.refresh = refresh
         
-        
         # process the data to create features
-        # self.store_response_vars()
-        # self.compute_features()
-        # self.leaguewide_standardization()
-        # self.previous_games_vs_opponent()
-        # self.features = self.get_opponent_abv(self.features)
-        # self.features.to_csv('regular_features_no_rolling.csv')
+        self.store_response_vars()
+        self.compute_features()
+        self.leaguewide_standardization()
+        self.previous_games_vs_opponent()
+        self.features = self.get_opponent_abv(self.features)
+        # self.features.to_csv('regular_features_no_rolling.csv') # for tuning externally
 
-        # self.exog_features = self.compute_rolling_avg_exog(self.features)
-        # self.exog_features = self.shift_observations(self.exog_features)
-        # self.exog_features = self.match_opponent_stats(self.exog_features) # not working for exog features? cehck
-        # self.exog_features.to_csv('exog_features.csv')
+        self.exog_features = self.compute_rolling_avg_exog(self.features)
+        self.exog_features = self.shift_observations(self.exog_features)
+        self.exog_features = self.match_opponent_stats(self.exog_features) # not working for exog features? cehck
+        # self.exog_features.to_csv('exog_features.csv') # for tuning externally
         
-        self.exog_features = pd.read_csv('exog_features.csv') # need to set multi-index*************************************
-        self.features = pd.read_csv('regular_features_no_rolling.csv') #debug checkpoint
+        # self.exog_features = pd.read_csv('exog_features.csv').set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION']) #debug checkpoint # need to set multi-index*************************************
+        # self.features = pd.read_csv('regular_features_no_rolling.csv').set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION']) #debug checkpoint
         self.features = self.compute_rolling_avg_optimal(df=self.features)
         self.features = self.compute_rolling_avg(df=self.features, window=8)
         self.features = self.compute_rolling_avg(df=self.features, window=16)
@@ -548,68 +549,69 @@ class ComputeFeatures:
         '''
         apply the fitted DFM time series models to relevant feature columns
         '''
-        df = df.copy().set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
         # df = df.sort_index()
-        df_exog = self.exog_features.copy().set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
+        df_exog = self.exog_features.copy()
 
-        dfm_1_path = 'dfm_1.pkl'
+        dfm_paths = ['catalogs/parameters/dfm_1.pkl', 'catalogs/parameters/dfm_2.pkl']
 
         # Open and load the pickle file
-        with open(dfm_1_path, 'rb') as file:
-            dfm_1 = pickle.load(file)
-        endog_1 = dfm_1['ATL']['endog']
-        exog_1 = dfm_1['ATL']['exog']
-        exog_ra8 = [x for x in exog_1 if '_ra8' in x]
-        exog_ra32 = [x for x in exog_1 if '_ra32' in x]
-        exog_1 = [x for x in exog_1 if not '_ra' in x]
+        for dfm_path in dfm_paths:
+            print('Applying DFM model from', dfm_path)
+            with open(dfm_path, 'rb') as file:
+                dfm = pickle.load(file)
+            endog_1 = dfm['ATL']['endog']
+            exog_1 = dfm['ATL']['exog']
+            exog_ra8 = [x for x in exog_1 if '_ra8' in x]
+            exog_ra32 = [x for x in exog_1 if '_ra32' in x]
+            exog_1 = [x for x in exog_1 if not '_ra' in x]
 
-        # unique_teams = df['TEAM_ABBREVIATION'].unique()
-        for team, group in df.groupby('TEAM_ABBREVIATION', group_keys=False):
-            if team != 'NOH': #in ['ATL', 'OKC', 'MIL']:
+            # unique_teams = df['TEAM_ABBREVIATION'].unique()
+            for team, group in df.groupby('TEAM_ABBREVIATION', group_keys=False):
+                if team != 'NOH': #in ['ATL', 'OKC', 'MIL']:
 
-                print(team)
-                endog_series = group[endog_1].apply(pd.to_numeric, errors='coerce').dropna().sort_index()  
-                exog_series = df_exog.xs(team, level='TEAM_ABBREVIATION', drop_level=False)[exog_1].dropna().sort_index() 
+                    print(team)
+                    endog_series = group[endog_1].apply(pd.to_numeric, errors='coerce').dropna().sort_index()  
+                    exog_series = df_exog.xs(team, level='TEAM_ABBREVIATION', drop_level=False)[exog_1].dropna().sort_index() 
 
-                for feature in exog_ra8:
-                    exog_series[feature] = endog_series[feature.split('_ra')[0]].rolling(window=8).mean().shift(1)
-                for feature in exog_ra32:
-                    exog_series[feature] = endog_series[feature.split('_ra')[0]].rolling(window=32).mean().shift(1)
+                    for feature in exog_ra8:
+                        exog_series[feature] = endog_series[feature.split('_ra')[0]].rolling(window=8).mean().shift(1)
+                    for feature in exog_ra32:
+                        exog_series[feature] = endog_series[feature.split('_ra')[0]].rolling(window=32).mean().shift(1)
 
-                exog_series = exog_series.dropna()
-                endog_series = endog_series.dropna()
-                common_indices = exog_series.index.intersection(endog_series.index)
+                    exog_series = exog_series.dropna()
+                    endog_series = endog_series.dropna()
+                    common_indices = exog_series.index.intersection(endog_series.index)
 
-                exog_series = exog_series.loc[common_indices]
-                endog_series = endog_series.loc[common_indices]
+                    exog_series = exog_series.loc[common_indices]
+                    endog_series = endog_series.loc[common_indices]
 
-                exog_series = exog_series.reset_index(drop=True)
-                endog_series = endog_series.reset_index(drop=True)
+                    exog_series = exog_series.reset_index(drop=True)
+                    endog_series = endog_series.reset_index(drop=True)
 
-                k_factors = dfm_1[team]["k_factors"]
-                factor_order = dfm_1[team]["factor_order"]
-                params = dfm_1[team]['params']
+                    k_factors = dfm[team]["k_factors"]
+                    factor_order = dfm[team]["factor_order"]
+                    params = dfm[team]['params']
 
-                # Apply the fitted model's parameters to the new data using filtering
-                mod = sm.tsa.DynamicFactor(
-                    endog=endog_series,
-                    exog=exog_series,
-                    k_factors=k_factors,
-                    factor_order=factor_order
-                )
+                    # Apply the fitted model's parameters to the new data using filtering
+                    mod = sm.tsa.DynamicFactor(
+                        endog=endog_series,
+                        exog=exog_series,
+                        k_factors=k_factors,
+                        factor_order=factor_order
+                    )
 
-                transformed_result = mod.filter(params)
-                filtered_df = transformed_result.fittedvalues.copy()
-                filtered_df.index = common_indices  # if needed
-                filtered_df = filtered_df.add_suffix('_dfm')
+                    transformed_result = mod.filter(params)
+                    filtered_df = transformed_result.fittedvalues.copy()
+                    filtered_df.index = common_indices  # if needed
+                    filtered_df = filtered_df.add_suffix('_dfm')
 
-                for col in filtered_df.columns:
-                    if col not in df:
-                        df[col] = np.nan
+                    for col in filtered_df.columns:
+                        if col not in df:
+                            df[col] = np.nan
 
-                df.update(filtered_df)
+                    df.update(filtered_df)
 
-                print(team, 'complete')
+                    print(team, 'complete')
 
         return df
 
