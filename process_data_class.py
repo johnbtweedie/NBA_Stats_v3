@@ -406,7 +406,7 @@ class ComputeFeatures:
 
                 # End time of the loop and print the time taken
                 elapsed_time = time.time() - start_time
-                print(f"Time taken for {team_1} vs {team_2}: {elapsed_time:.4f} seconds")
+                # print(f"Time taken for {team_1} vs {team_2}: {elapsed_time:.4f} seconds")
         
         self.features = df_feat
         # return df_feat
@@ -467,7 +467,7 @@ class ComputeFeatures:
                                 'DaysElapsed', 'DaysRest', 'WL', 'Poss', 'OffRat', 'DefRat',	
                                 'OREB%', 'DREB%', 'TOV%', 'TOV_forced%', 'STL%', 'AST%', 'BB%',
                                 'eFG%_z', 'eFG%_against_z', 'TS%_z', 'TS%_against_z',	
-                                'Poss_z', 'OffRat_z', 'DefRat_z',	#'Home', 'roadtrip',
+                                'Poss_z', 'OffRat_z', 'DefRat_z',	'roadtrip', #'Home', 
                                 'OREB%_z', 'DREB%_z', 'TOV%_z', 'TOV_forced%_z', 'STL%_z', 'AST%_z']
 
         
@@ -657,7 +657,7 @@ class ComputeFeatures:
 
         # group by teams, shift features by one game
         df_shift_by_team = df.sort_index()
-        list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed', 'oppAbv']
+        list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed', 'oppAbv', 'WL']
         list_of_cols_to_exclude.extend([col for col in df.columns if '_prev' in col])
 
         # Columns to apply the transformation
