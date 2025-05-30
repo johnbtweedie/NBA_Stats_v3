@@ -18,6 +18,11 @@ import warnings
 import matplotlib.pyplot as plt
 from datetime import datetime
 from sklearn.ensemble import RandomForestRegressor
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+import pandas as pd
+import time
 # Ignore all warnings
 warnings.filterwarnings('ignore')
 
@@ -134,7 +139,7 @@ class trainClassificationModel:
         '''
         print('processing feature data...')
         feature_cols = pd.read_excel(r'/Users/johntweedie/Dev/Projects/PN24001_NBA_Stats/catalogs/features_cols.xlsx',
-                             sheet_name='feat_2024-05-19')['feature_cols'].tolist()
+                             sheet_name='feat_2024-05-22_v1.0')['feature_cols'].tolist()
         feature_cols = [col.strip().replace("'", "") for col in feature_cols]
         self.features = self.features.dropna()
         # self.features = self.features.drop(columns='DaysElapsed')
@@ -457,7 +462,7 @@ class trainClassificationModel:
         }
         print('...complete\n')
 
-    def tune_model_gradient_boost(self, dense_grid=False):
+    def tune_model_gradient_boost_old(self, dense_grid=False):
         # ----------------------------------------------------------------------------------------------------------------------#
         # Gradient Boosting Model
         # ----------------------------------------------------------------------------------------------------------------------#
@@ -466,16 +471,16 @@ class trainClassificationModel:
         if dense_grid:
             # Define the parameter grid for Gradient Boosting
             param_grid = {
-                'n_estimators': [50, 100, 200, 500],  # Number of boosting stages
-                'learning_rate': [0.001, 0.01, 0.1, 0.2],  # Step size shrinkage
-                'max_depth': [3, 5, 10, 20],  # Maximum depth of individual estimators
-                'min_samples_split': [2, 5, 10],  # Minimum samples required to split a node
-                'min_samples_leaf': [1, 2, 4],  # Minimum samples required at each leaf node
-                'subsample': [0.8, 1.0],  # Fraction of samples used for fitting each estimator
+                'n_estimators': [100, 300],
+                'learning_rate': [0.01, 0.05, 0.1],
+                'max_depth': [3, 5, 7],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4],
+                'subsample': [0.6, 0.8, 1.0],
             }
         else:
             param_grid = {
-                'n_estimators': [50, 100],  # Number of boosting stages
+                'n_estimators': [100],  # Number of boosting stages
                 'learning_rate': [0.001, 0.1],  # Step size shrinkage
                 'max_depth': [3, 10],  # Maximum depth of individual estimators
                 'min_samples_split': [2, 5],  # Minimum samples required to split a node
@@ -519,6 +524,105 @@ class trainClassificationModel:
                                                 'hold pred' : y_hold_pred,
                                                 'y_hold'    : self.data_dict['y_hold']
         }
+        print('...complete\n')
+
+    def tune_model_gradient_boost(self, dense_grid=False):
+        print('Fitting Gradient Boosting model')
+
+        if dense_grid:
+            param_grid = {
+                'n_estimators': [100, 300],
+                'learning_rate': [0.01, 0.05, 0.1],
+                'max_depth': [3, 5, 7],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4],
+                'subsample': [0.6, 0.8, 1.0],
+            }
+        else:
+            param_grid = {
+                'n_estimators': [100],
+                'learning_rate': [0.001, 0.1],
+                'max_depth': [3, 10],
+                'min_samples_split': [2, 5],
+                'min_samples_leaf': [1, 2],
+                'subsample': [0.8],
+            }
+
+        # Use stratified CV for classification
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+        grid_search = GridSearchCV(
+            estimator=GradientBoostingClassifier(random_state=100),
+            param_grid=param_grid,
+            cv=cv,
+            scoring='accuracy',
+            n_jobs=-1,
+            verbose=2,
+            return_train_score=True
+        )
+
+        start_time = time.time()
+        grid_search.fit(self.data_dict['X_train'], self.data_dict['y_train'])
+        end_time = time.time()
+
+        print(f"Grid search completed in {end_time - start_time:.2f} seconds")
+
+        best_params = grid_search.best_params_
+        print("Best Parameters from Grid Search:", best_params)
+
+        # Visualization: Create a DataFrame from cv_results_
+        results_df = pd.DataFrame(grid_search.cv_results_)
+        results_df.to_csv("gradient_boost_grid_results.csv", index=False)
+
+        # # Simple heatmap or scatter if 2 params vary
+        # if len(param_grid) == 2:
+        #     pivot = results_df.pivot_table(values="mean_test_score",
+        #                                 index=list(param_grid.keys())[0],
+        #                                 columns=list(param_grid.keys())[1])
+        #     sns.heatmap(pivot, annot=True, fmt=".3f", cmap="viridis")
+        #     plt.title("Grid Search Accuracy")
+        #     plt.savefig("gradient_boost_grid_search_heatmap.png")
+        #     plt.close()
+        # else:
+        #     # Plot accuracy vs learning rate or n_estimators
+        #     for param in ['learning_rate', 'n_estimators', 'max_depth']:
+        #         if param in param_grid:
+        #             plt.figure()
+        #             sns.lineplot(data=results_df, x=param, y='mean_test_score')
+        #             plt.title(f'Accuracy vs {param}')
+        #             plt.savefig(f"accuracy_vs_{param}.png")
+        #             plt.close()
+
+        best_model = grid_search.best_estimator_
+        y_prob = best_model.predict_proba(self.data_dict['X_test'])
+        y_pred = best_model.predict(self.data_dict['X_test'])
+
+        df_results = model_classification_performance(
+            self.data_dict['y_test'], y_pred,
+            model_name="gradient boost model", model_call=best_model
+        )
+
+        y_hold_pred, y_hold_prob, df_holdout_results = None, None, None
+        if self.holdout:
+            y_hold_pred = best_model.predict(self.data_dict['X_hold'])
+            y_hold_prob = best_model.predict_proba(self.data_dict['X_hold'])
+            df_holdout_results = holdout_classification_performance(
+                self.data_dict['y_hold'], y_hold_prob,
+                model_name="gradient boost model", model_call=best_model
+            )
+
+        self.models['class_gradientBoost'] = {
+            'best model': best_model,
+            'test results': df_results,
+            'holdout results': df_holdout_results,
+            'test prob': y_prob,
+            'test pred': y_pred,
+            'y_test': self.data_dict['y_test'],
+            'hold prob': y_hold_prob,
+            'hold pred': y_hold_pred,
+            'y_hold': self.data_dict['y_hold']
+        }
+
         print('...complete\n')
 
     def fit_logistic_ensemble(self, eval_metric='auc'):
@@ -595,5 +699,5 @@ class trainClassificationModel:
         joblib.dump(save_dict, model_filename)
         print('...complete\n')
 
-WL_models = trainClassificationModel()
+WL_models = trainClassificationModel(dense_grid=True)
 print("complete")

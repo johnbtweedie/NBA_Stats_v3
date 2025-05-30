@@ -699,7 +699,7 @@ class ComputeFeatures:
         cols = df_feat.columns.to_list()
         opp_cols = []
 
-        for col in tqdm(cols, desc="Processing columns"):
+        for col in tqdm(cols, desc="matching opponent stats..."):
             opp_col = col + '_opp'
             if opp_col not in {'WL_opp', 'oppAbv_opp'}:
                 opp_cols.append(opp_col)
