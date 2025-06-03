@@ -15,6 +15,9 @@ from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.metrics import mean_squared_error, accuracy_score, confusion_matrix, classification_report, f1_score, roc_auc_score
+import os
+print("Running script from:", __file__)
+print("Current working directory:", os.getcwd())
 
 
 class AssembleModels:
@@ -215,10 +218,11 @@ class AssembleModels:
         return results_dict
 
 class AssembleFeatures:
-    def __init__(self, conn=sqlite3.connect('nba_database_2025-01-18.db')):
+    def __init__(self, conn=sqlite3.connect('nba_database_2025-01-18.db'), for_custom_matchups=False):
         self.conn = conn
         self.data = self.load_data('current_team_data')
         self.prev_data = self.load_data('prev_team_data')
+        self.for_custom_matchups = for_custom_matchups
 
     def load_data(self, db_table_name):
         '''
@@ -258,6 +262,13 @@ class AssembleFeatures:
         home_features_renamed.index = ([away_abv])
         away_features_renamed.index = ([home_abv])
         
+        if self.for_custom_matchups:
+            home_features['DaysRest'] = 1
+            away_features['DaysRest'] = 1
+
+            home_features['roadtrip'] = 0
+            away_features['roadtrip'] = 1
+
         home_features['Home'] = 1
         away_features['Home'] = 0
         
@@ -384,10 +395,10 @@ if __name__ == '__main__':
             }
 
             # AssembleModels(best_models_path='best_models_2025-01-25_14-44-24.pkl')
-            models = AssembleModels(best_models_path='catalogs/best_models_2025-05-25_03-21-15.pkl')
+            models = AssembleModels(best_models_path='/Users/johntweedie/Dev/Projects/PN24001_NBA_Stats/catalogs/best_models_2025-05-25_03-21-15.pkl')
             
             feature_list = models.models['data']['features']
-            features = AssembleFeatures().assemble_game_features(feature_list, games, models)
+            features = AssembleFeatures(for_custom_matchups=True).assemble_game_features(feature_list, games, models)
             predictions = make_predictions(games, features, models)
             results = pd.DataFrame(games).T
             for model in predictions.items():
