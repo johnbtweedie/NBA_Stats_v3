@@ -1,13 +1,12 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, RandomizedSearchCV, GridSearchCV
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import StandardScaler
-from sklearn.neural_network import MLPClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.svm import SVC
-from sklearn.metrics import mean_squared_error, accuracy_score, confusion_matrix, classification_report, f1_score, roc_auc_score, log_loss
+from sklearn.neural_network import MLPClassifier, MLPRegressor
+from sklearn.linear_model import LogisticRegression, ElasticNet, Ridge
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, RandomForestRegressor, StackingRegressor
+from sklearn.svm import SVC, SVR
+from sklearn.metrics import mean_squared_error, confusion_matrix, f1_score, roc_auc_score, log_loss, r2_score, mean_absolute_error
 from sklearn.linear_model import LogisticRegression
 import joblib
 from sklearn.decomposition import PCA
@@ -17,7 +16,6 @@ import itertools
 import warnings
 import matplotlib.pyplot as plt
 from datetime import datetime
-from sklearn.ensemble import RandomForestRegressor
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import GridSearchCV, StratifiedKFold
@@ -91,7 +89,7 @@ def holdout_classification_performance(y_test, y_prob, model_name, model_call):
 
     return pd.DataFrame(results_dict, index=[model_name])
 
-class trainClassificationModel:
+class trainModel:
     def __init__(self, 
                  conn=sqlite3.connect('nba_database_2025-01-18.db'),
                  model_type='classification',
@@ -107,6 +105,8 @@ class trainClassificationModel:
         
         self.responses = self.load_data('response_table')
         self.process_response(target_response)
+
+        self.response = target_response
         
         self.test_train_split()
         self.scaler_used = False
@@ -120,8 +120,11 @@ class trainClassificationModel:
 
         if model_type == 'classification':
             self.train_classification_models(dense_grid)
+        if model_type == 'regression':
+            self.train_regression_models(dense_grid)
         print('complete')
 
+    #--- Preprocess ---#
     def load_data(self, db_table_name):
         '''
         get features and responses from database
@@ -219,6 +222,7 @@ class trainClassificationModel:
                                                 index=self.data_dict['y_hold'].index)
         print('...complete\n')
 
+    #--- Classifiers ---#
     def train_classification_models(self, dense_grid):
         self.models = {}
         self.tune_model_nnet(dense_grid)
@@ -281,7 +285,7 @@ class trainClassificationModel:
             y_hold_prob = best_model.predict_proba(self.data_dict['X_hold'])
             df_holdout_results = holdout_classification_performance(self.data_dict['y_hold'], y_hold_prob, model_name="nnet model", model_call=best_model)
 
-        self.models['class_nnet'] = {    'best model' : best_model, 
+        self.models[f'{self.response}_clf_nnet'] = {    'best model' : best_model, 
                                          'test results' : df_results,
                                          'holdout results' : df_holdout_results,
                                          'test prob' : y_prob,
@@ -337,7 +341,7 @@ class trainClassificationModel:
             y_hold_prob = best_model.predict_proba(self.data_dict['X_hold'])
             df_holdout_results = holdout_classification_performance(self.data_dict['y_hold'], y_hold_prob, model_name="SVM model", model_call=best_model)
 
-        self.models['class_svm'] = {     'best model' : best_model, 
+        self.models[f'{self.response}_clf_svm'] = {     'best model' : best_model, 
                                          'test results' : df_results,
                                          'holdout results' : df_holdout_results,
                                          'test prob' : y_prob,
@@ -389,7 +393,7 @@ class trainClassificationModel:
             y_hold_prob = best_model.predict_proba(self.data_dict['X_hold'])
             df_holdout_results = holdout_classification_performance(self.data_dict['y_hold'], y_hold_prob, model_name="logit model", model_call=best_model)
 
-        self.models['class_logit'] = {   'best model' : best_model, 
+        self.models[f'{self.response}_clf_logit'] = {   'best model' : best_model, 
                                          'test results' : df_results,
                                          'holdout results' : df_holdout_results,
                                          'test prob' : y_prob,
@@ -450,7 +454,7 @@ class trainClassificationModel:
             y_hold_prob = best_model.predict_proba(self.data_dict['X_hold'])
             df_holdout_results = holdout_classification_performance(self.data_dict['y_hold'], y_hold_prob, model_name="random forest", model_call=best_model)
 
-        self.models['class_randomForest'] = {   'best model' : best_model, 
+        self.models[f'{self.response}_clf_randomForest'] = {   'best model' : best_model, 
                                                 'test results' : df_results,
                                                 'holdout results' : df_holdout_results,
                                                 'test prob' : y_prob,
@@ -611,7 +615,7 @@ class trainClassificationModel:
                 model_name="gradient boost model", model_call=best_model
             )
 
-        self.models['class_gradientBoost'] = {
+        self.models[f'{self.response}_clf_gradientBoost'] = {
             'best model': best_model,
             'test results': df_results,
             'holdout results': df_holdout_results,
@@ -678,10 +682,494 @@ class trainClassificationModel:
 
         return ensemble_probs, score, ensemble_results
 
+    #--- Regressors ---#
+    def train_regression_models(self, dense_grid):
+        self.models = {}
+        self.tune_model_nnet_regressor(dense_grid)
+        self.tune_model_svr(dense_grid)
+        self.tune_model_elastic_net()
+        # self.tune_model_rf(dense_grid)
+        # self.tune_model_gradient_boost(dense_grid)
+        self.fit_stack_ensemble(dense_grid)
+        self.save_best_models()
+
+    def eval_regression_model(self, grid_search, model_type: str=''):
+        '''
+        standardize model performance evaluation and artifact saving for regressors
+        '''
+
+        # Best parameters/model
+        best_params = grid_search.best_params_
+        print("Best Parameters from Grid Search:", best_params)
+        best_model = grid_search.best_estimator_
+
+        # Predict on test
+        X_test = self.data_dict['X_test']
+        y_test = np.asarray(self.data_dict['y_test'])
+        if y_test.ndim == 2 and y_test.shape[1] == 1:
+            y_test = y_test.ravel()
+
+        y_pred = best_model.predict(X_test)
+
+        # Metrics
+        mse = mean_squared_error(y_test, y_pred)
+        rmse = float(np.sqrt(mse))
+        mae = mean_absolute_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+
+        df_results = pd.DataFrame([{
+            'model': 'nnet regressor',
+            'rmse': rmse,
+            'mae': mae,
+            'r2': r2,
+            'mse': mse,
+            'params': best_params
+        }])
+
+        # Holdout (optional)
+        df_holdout_results = None
+        y_hold_pred = None
+        if getattr(self, 'holdout', True) and 'X_hold' in self.data_dict and 'y_hold' in self.data_dict:
+            X_hold = self.data_dict['X_hold']
+            y_hold = np.asarray(self.data_dict['y_hold'])
+            if y_hold.ndim == 2 and y_hold.shape[1] == 1:
+                y_hold = y_hold.ravel()
+
+            y_hold_pred = best_model.predict(X_hold)
+            hold_mse = mean_squared_error(y_hold, y_hold_pred)
+            hold_rmse = float(np.sqrt(hold_mse))
+            hold_mae = mean_absolute_error(y_hold, y_hold_pred)
+            hold_r2 = r2_score(y_hold, y_hold_pred)
+
+            df_holdout_results = pd.DataFrame([{
+                'model': f'{model_type} regressor',
+                'rmse': hold_rmse,
+                'mae': hold_mae,
+                'r2': hold_r2,
+                'mse': hold_mse,
+                'params': best_params
+            }])
+
+        # Store artifacts 
+        self.models[f'{self.response}_reg_{model_type}'] = {
+            'best model': best_model,
+            'best params': best_params,
+            'cv results': grid_search.cv_results_,
+            'test results': df_results,
+            'test pred': y_pred,
+            'y_test': self.data_dict['y_test'],
+            'holdout results': df_holdout_results,
+            'hold pred': y_hold_pred,
+            'y_hold': self.data_dict.get('y_hold', None),
+        }
+
+        print(f"Test — RMSE: {rmse:.4f} | MAE: {mae:.4f} | R²: {r2:.4f}")
+        if df_holdout_results is not None:
+            print(f"Holdout — RMSE: {df_holdout_results['rmse'].iloc[0]:.4f} | "
+                f"MAE: {df_holdout_results['mae'].iloc[0]:.4f} | "
+                f"R²: {df_holdout_results['r2'].iloc[0]:.4f}")
+        print('...complete\n')
+
+    def tune_model_nnet_regressor(self, dense_grid: bool = False):
+        # ------------------------------------------------------------------------------------------------------------------ #
+        # Neural Net Regressor (MLPRegressor)
+        # ------------------------------------------------------------------------------------------------------------------ #
+        print('fitting nn regressor')
+
+        # Base model (data already scaled per you). Keep early_stopping for speed/regularization.
+        self.nn_model = MLPRegressor(
+            random_state=100,
+            early_stopping=True,          # requires solver='adam'
+            validation_fraction=0.1,
+            n_iter_no_change=10,
+            max_iter=300
+        )
+
+        if dense_grid:
+            param_grid = {
+                'hidden_layer_sizes': [(32,), (64,), (64, 32), (128, 64, 32)],
+                'alpha': [1e-5, 1e-4, 1e-3, 1e-2],
+                'learning_rate_init': [1e-3, 3e-3, 1e-2],
+                'max_iter': [300, 500],
+                'solver': ['adam'],                  # keep adam for early_stopping
+                'activation': ['relu', 'tanh'],
+            }
+        else:
+            param_grid = {
+                'hidden_layer_sizes': [(32,)], #, (64, 32)],
+                'alpha': [1e-4], #, 1e-3],
+                'learning_rate_init': [1e-3, 1e-2],
+                'max_iter': [300],
+                'solver': ['adam'],
+                'activation': ['relu'],
+            }
+
+        # Multi-metric scoring; refit on lowest MSE (note sklearn uses negative losses for “higher is better”)
+        scoring = {
+            'neg_mse': 'neg_mean_squared_error',
+            'neg_mae': 'neg_mean_absolute_error',
+            'r2': 'r2',
+        }
+
+        grid_search = GridSearchCV(
+            estimator=self.nn_model,
+            param_grid=param_grid,
+            cv=5,
+            scoring=scoring,
+            refit='neg_mse',             # best by MSE; switch to 'r2' if you prefer
+            n_jobs=-1,
+            verbose=2
+        )
+
+        print('Fitting nn regressor with Grid Search')
+
+        X_train = self.data_dict['X_train']
+        y_train = self.data_dict['y_train']
+
+        # Ensure y is proper shape
+        y_train = np.asarray(y_train)
+        if y_train.ndim == 2 and y_train.shape[1] == 1:
+            y_train = y_train.ravel()  # single-target
+
+        grid_search.fit(X_train, y_train)
+
+        self.eval_regression_model(grid_search,
+                                   model_type='nnet')
+        # # Best parameters/model
+        # best_params = grid_search.best_params_
+        # print("Best Parameters from Grid Search:", best_params)
+        # best_model = grid_search.best_estimator_
+
+        # # Predict on test
+        # X_test = self.data_dict['X_test']
+        # y_test = np.asarray(self.data_dict['y_test'])
+        # if y_test.ndim == 2 and y_test.shape[1] == 1:
+        #     y_test = y_test.ravel()
+
+        # y_pred = best_model.predict(X_test)
+
+        # # Metrics
+        # mse = mean_squared_error(y_test, y_pred)
+        # rmse = float(np.sqrt(mse))
+        # mae = mean_absolute_error(y_test, y_pred)
+        # r2 = r2_score(y_test, y_pred)
+
+        # df_results = pd.DataFrame([{
+        #     'model': 'nnet regressor',
+        #     'rmse': rmse,
+        #     'mae': mae,
+        #     'r2': r2,
+        #     'mse': mse,
+        #     'params': best_params
+        # }])
+
+        # # Holdout (optional)
+        # df_holdout_results = None
+        # y_hold_pred = None
+        # if getattr(self, 'holdout', False) and 'X_hold' in self.data_dict and 'y_hold' in self.data_dict:
+        #     X_hold = self.data_dict['X_hold']
+        #     y_hold = np.asarray(self.data_dict['y_hold'])
+        #     if y_hold.ndim == 2 and y_hold.shape[1] == 1:
+        #         y_hold = y_hold.ravel()
+
+        #     y_hold_pred = best_model.predict(X_hold)
+        #     hold_mse = mean_squared_error(y_hold, y_hold_pred)
+        #     hold_rmse = float(np.sqrt(hold_mse))
+        #     hold_mae = mean_absolute_error(y_hold, y_hold_pred)
+        #     hold_r2 = r2_score(y_hold, y_hold_pred)
+
+        #     df_holdout_results = pd.DataFrame([{
+        #         'model': 'nnet regressor',
+        #         'rmse': hold_rmse,
+        #         'mae': hold_mae,
+        #         'r2': hold_r2,
+        #         'mse': hold_mse,
+        #         'params': best_params
+        #     }])
+
+        # # Store artifacts 
+        # self.models[f'{self.response}_reg_nnet'] = {
+        #     'best model': best_model,
+        #     'best params': best_params,
+        #     'cv results': grid_search.cv_results_,
+        #     'test results': df_results,
+        #     'test pred': y_pred,
+        #     'y_test': self.data_dict['y_test'],
+        #     'holdout results': df_holdout_results,
+        #     'hold pred': y_hold_pred,
+        #     'y_hold': self.data_dict.get('y_hold', None),
+        # }
+
+        # print(f"Test — RMSE: {rmse:.4f} | MAE: {mae:.4f} | R²: {r2:.4f}")
+        # if df_holdout_results is not None:
+        #     print(f"Holdout — RMSE: {df_holdout_results['rmse'].iloc[0]:.4f} | "
+        #         f"MAE: {df_holdout_results['mae'].iloc[0]:.4f} | "
+        #         f"R²: {df_holdout_results['r2'].iloc[0]:.4f}")
+        # print('...complete\n')
+
+    def tune_model_svr(self, dense_grid: bool = False):
+        # ------------------------------------------------------------------------------------------------------------------ #
+        # SV Regression
+        # ------------------------------------------------------------------------------------------------------------------ #
+        print('fitting support vector regressor')
+
+        # Base model (data already scaled per you). Keep early_stopping for speed/regularization.
+
+        self.svr_model = SVR(kernel='rbf')  # data already scaled
+
+        if dense_grid:
+            param_grid = {
+                "kernel": ["rbf"],                     # keep to rbf; add "linear","poly" if desired
+                "C": [0.5, 1, 3, 10, 30, 100],
+                "epsilon": [0.01, 0.05, 0.1, 0.2],
+                "gamma": ["scale", "auto", 0.01, 0.03, 0.1],
+            }
+        else:
+            param_grid = {
+                "kernel": ["rbf"],
+                "C": [1, 3],#[1, 3, 10],
+                "epsilon": [0.05], #, 0.1],
+                "gamma": ["scale", 0.03],
+            }
+        # Multi-metric scoring; refit on lowest MSE (note sklearn uses negative losses for “higher is better”)
+        scoring = {
+                'neg_mse': 'neg_mean_squared_error',
+                'neg_mae': 'neg_mean_absolute_error',
+                'r2': 'r2',
+            }
+
+        grid_search = GridSearchCV(
+            estimator=self.svr_model,
+            param_grid=param_grid,
+            cv=5,
+            refit='neg_mse',             # best by MSE; switch to 'r2' if you prefer
+            n_jobs=-1,
+            verbose=2
+        )
+
+        print('Fitting nn regressor with Grid Search')
+
+        X_train = self.data_dict['X_train']
+        y_train = self.data_dict['y_train']
+
+        # Ensure y is proper shape
+        y_train = np.asarray(y_train)
+        if y_train.ndim == 2 and y_train.shape[1] == 1:
+            y_train = y_train.ravel()  # single-target
+
+        grid_search.fit(X_train, y_train)
+
+        self.eval_regression_model(grid_search,
+                            model_type='svr')
+
+        # # Best parameters/model
+        # best_params = grid_search.best_params_
+        # print("Best Parameters from Grid Search:", best_params)
+        # best_model = grid_search.best_estimator_
+
+        # # Predict on test
+        # X_test = self.data_dict['X_test']
+        # y_test = np.asarray(self.data_dict['y_test'])
+        # if y_test.ndim == 2 and y_test.shape[1] == 1:
+        #     y_test = y_test.ravel()
+
+        # y_pred = best_model.predict(X_test)
+
+        # # Metrics
+        # mse = mean_squared_error(y_test, y_pred)
+        # rmse = float(np.sqrt(mse))
+        # mae = mean_absolute_error(y_test, y_pred)
+        # r2 = r2_score(y_test, y_pred)
+
+        # df_results = pd.DataFrame([{
+        #     'model': 'elastic net',
+        #     'rmse': rmse,
+        #     'mae': mae,
+        #     'r2': r2,
+        #     'mse': mse,
+        #     'params': best_params
+        # }])
+
+        # # Holdout (optional)
+        # df_holdout_results = None
+        # y_hold_pred = None
+        # if getattr(self, 'holdout', False) and 'X_hold' in self.data_dict and 'y_hold' in self.data_dict:
+        #     X_hold = self.data_dict['X_hold']
+        #     y_hold = np.asarray(self.data_dict['y_hold'])
+        #     if y_hold.ndim == 2 and y_hold.shape[1] == 1:
+        #         y_hold = y_hold.ravel()
+
+        #     y_hold_pred = best_model.predict(X_hold)
+        #     hold_mse = mean_squared_error(y_hold, y_hold_pred)
+        #     hold_rmse = float(np.sqrt(hold_mse))
+        #     hold_mae = mean_absolute_error(y_hold, y_hold_pred)
+        #     hold_r2 = r2_score(y_hold, y_hold_pred)
+
+        #     df_holdout_results = pd.DataFrame([{
+        #         'model': 'elastic net',
+        #         'rmse': hold_rmse,
+        #         'mae': hold_mae,
+        #         'r2': hold_r2,
+        #         'mse': hold_mse,
+        #         'params': best_params
+        #     }])
+
+        # # Store artifacts 
+        # self.models[f'{self.response}_reg_svr'] = {
+        #     'best model': best_model,
+        #     'best params': best_params,
+        #     'cv results': grid_search.cv_results_,
+        #     'test results': df_results,
+        #     'test pred': y_pred,
+        #     'y_test': self.data_dict['y_test'],
+        #     'holdout results': df_holdout_results,
+        #     'hold pred': y_hold_pred,
+        #     'y_hold': self.data_dict.get('y_hold', None),
+        # }
+
+        # print(f"Test — RMSE: {rmse:.4f} | MAE: {mae:.4f} | R²: {r2:.4f}")
+        # if df_holdout_results is not None:
+        #     print(f"Holdout — RMSE: {df_holdout_results['rmse'].iloc[0]:.4f} | "
+        #         f"MAE: {df_holdout_results['mae'].iloc[0]:.4f} | "
+        #         f"R²: {df_holdout_results['r2'].iloc[0]:.4f}")
+        # print('...complete\n')
+
+    def tune_model_elastic_net(self, dense_grid: bool = False):
+        # ------------------------------------------------------------------------------------------------------------------ #
+        # Elastic Net Regression
+        # ------------------------------------------------------------------------------------------------------------------ #
+        print('fitting elastic net regressor')
+
+        # Base model (data already scaled per you). Keep early_stopping for speed/regularization.
+        self.enet_model = ElasticNet(
+            alpha=0.001,
+            l1_ratio=0.5,
+            random_state=42
+            )
+
+        if dense_grid:
+            param_grid = {
+                "alpha": [1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1.0],     # Regularization strength
+                "l1_ratio": [0.0, 0.25, 0.5, 0.75, 1.0],        # Mix between L1 (Lasso) and L2 (Ridge)
+                "max_iter": [500, 1000, 2000],                  # Iteration caps
+                "selection": ["cyclic", "random"],              # Coordinate descent update rule
+                "tol": [1e-4, 1e-3],                            # Convergence tolerance
+            }
+        else:
+            param_grid = {
+                "alpha": [1e-3],# 1e-2, 0.1],                     # Regularization strength
+                "l1_ratio": [0.25],#, 0.5, 0.75],                  # L1/L2 balance
+                "max_iter": [500, 1000],                        # Iteration caps
+                "selection": ["cyclic"],                        # Simpler option
+                "tol": [1e-4],                                  # Convergence tolerance
+            }
+
+        # Multi-metric scoring; refit on lowest MSE (note sklearn uses negative losses for “higher is better”)
+        scoring = {
+            'neg_mse': 'neg_mean_squared_error',
+            'neg_mae': 'neg_mean_absolute_error',
+            'r2': 'r2',
+        }
+
+        grid_search = GridSearchCV(
+            estimator=self.enet_model,
+            param_grid=param_grid,
+            cv=5,
+            scoring=scoring,
+            refit='neg_mse',             # best by MSE; switch to 'r2' if you prefer
+            n_jobs=-1,
+            verbose=2
+        )
+
+        print('Fitting nn regressor with Grid Search')
+
+        X_train = self.data_dict['X_train']
+        y_train = self.data_dict['y_train']
+
+        # Ensure y is proper shape
+        y_train = np.asarray(y_train)
+        if y_train.ndim == 2 and y_train.shape[1] == 1:
+            y_train = y_train.ravel()  # single-target
+
+        grid_search.fit(X_train, y_train)
+
+        self.eval_regression_model(grid_search,
+                                   model_type='enet')
+
+    def fit_stack_ensemble(self, eval_metric='auc'):
+        """
+        Fits a stacking ridge regression ensemble using fitted regression models.
+
+        Parameters:
+        - self: An object with
+            - .models: dict of models
+            - .data_dict['y_hold']
+        - eval_metric: 'auc' or 'logloss' to evaluate the model
+
+        Returns:
+        - ensemble_probs: np.array of predicted probabilities
+        - weights: pd.Series of model coefficients (importance)
+        - score: float, evaluation score
+        """
+        # Assemble model prediction probabilities
+        X = pd.DataFrame({
+            name: model['test pred']
+            for name, model in self.models.items()
+        })
+
+        y = self.data_dict['y_test']
+
+        stack = StackingRegressor(
+            estimators=[
+                ("svr", self.svr_model),
+                ("nnet", self.nn_model),
+                ("enet", self.enet_model)
+            ],
+            final_estimator=Ridge(alpha=1.0, positive=True, random_state=42),
+            cv=5,
+            n_jobs=-1,
+            passthrough=False  # set to True if you want to include original features
+            )
+        # Train
+        stack.fit(X, y)
+
+        # # Test
+        # y_hat = stack.predict(self.data_dict['X_test'])
+        # rmse = mean_squared_error(self.data_dict['y_test'], y_hat, squared=False)
+        # mae  = mean_absolute_error(self.data_dict['y_test'], y_hat)
+        # r2   = r2_score(self.data_dict['y_test'], y_hat)
+        # print(f"Stack — RMSE: {rmse:.4f} | MAE: {mae:.4f} | R²: {r2:.4f}")
+        
+        X = pd.DataFrame({
+            name: model['hold pred']
+            for name, model in self.models.items()
+        })
+
+        y = self.data_dict['y_hold']
+
+        y_hat = stack.predict(X)
+        rmse = mean_squared_error(y, y_hat, squared=False)
+        mae  = mean_absolute_error(y, y_hat)
+        r2   = r2_score(y, y_hat)
+        print(f"Stack — RMSE: {rmse:.4f} | MAE: {mae:.4f} | R²: {r2:.4f}")
+        print('complete')
+
+        # ensemble_results = holdout_classification_performance(self.data_dict['y_hold'], 
+        #                                                       ensemble_probs,
+        #                                                       model_name='ensemble', 
+        #                                                       model_call=weights)
+
+        # self.ensemble = {'ensemble probs' : ensemble_probs,
+        #                  'score' : score,
+        #                  'model' : stack,
+        #                  'holdout performance' : ensemble_results}
+
+        # return ensemble_probs, score, ensemble_results
+
     def save_best_models(self):
         print('saving best models...')
         datestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        model_filename = f'best_models_{datestamp}.pkl'
+        model_filename = f'best_models_{self.response}_{datestamp}.pkl'
         save_data_dict = {'X_hold' : self.data_dict['X_hold'],
                           'y_hold' : self.data_dict['y_hold'],
                           'X_test' : self.data_dict['X_test'],
@@ -699,5 +1187,9 @@ class trainClassificationModel:
         joblib.dump(save_dict, model_filename)
         print('...complete\n')
 
-WL_models = trainClassificationModel(dense_grid=True)
+
+# WL_models = trainModel(dense_grid=True)
+PTS_models = trainModel(dense_grid=True,
+                                  target_response='PTS_per48',
+                                  model_type='regression')
 print("complete")

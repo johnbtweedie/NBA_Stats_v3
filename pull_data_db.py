@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import json
-from nba_api.stats.endpoints import teamgamelogs
+from nba_api.stats.endpoints import teamgamelogs, playergamelogs
 from nba_api.stats.static import teams
 import time
 import sqlite3
@@ -15,6 +15,34 @@ def get_team_gamelog_data(team_id, n_games, season, max_retries=10):
             team_gamelog_data = teamgamelogs.TeamGameLogs(team_id_nullable=team_id,
                                                           season_nullable=season,
                                                           last_n_games_nullable=n_games,
+                                                          timeout=1
+                                                          ).get_json()
+
+            data_dict = json.loads(team_gamelog_data)
+            df = pd.DataFrame(data_dict['resultSets'][0]['rowSet'],
+                              columns=data_dict['resultSets'][0]['headers'])
+
+            # df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
+            df['GAME_DATE'] = df['GAME_DATE'].str.split('T').str[0]
+            df['GAME_ID'] = df['GAME_ID'].astype('int')
+            df = df.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
+
+            return df
+        except Exception as e:
+            print(f"Error: {e}. Retrying...")
+            attempt += 1
+            time.sleep(random.randint(1, 5))  # Wait for 5 seconds before retrying
+
+    print(f"Max retries ({max_retries}) reached. Couldn't fetch data.")
+    return None
+
+def get_player_gamelog_data(team_id, n_games, season, max_retries=10):
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            team_gamelog_data = playergamelogs.PlayerGameLogs(team_id_nullable=team_id,
+                                                          season_nullable=season,
+                                                        #   last_n_games_nullable=n_games,
                                                           timeout=1
                                                           ).get_json()
 
@@ -186,7 +214,7 @@ def update_database():
 
     print('saving to database...')
     combined_data.to_sql('formatted_data_table', conn, if_exists='replace', index=True)
-    combined_data.to_csv('historical_stats.csv')
+    # combined_data.to_csv('historical_stats.csv')
 
     # df_new = pd.read_sql('SELECT * FROM formatted_data_table', conn)
     conn.close()

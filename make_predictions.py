@@ -373,7 +373,6 @@ def make_predictions(games, features, models):
 
     return predictions
 
-
 if __name__ == '__main__':
 
             print('generating prediction data for all possible team matchups...')
