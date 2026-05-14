@@ -16,7 +16,7 @@ class getData:
         self.n_games = n_games
         self.teams = teams.get_teams()
 
-    def fetch_team_gamelog(self, team_id, season, max_retries=10):
+    def fetch_team_gamelog(self, team_id, season, max_retries=15):
 
         headers = {
             "Host": "stats.nba.com",
@@ -48,7 +48,7 @@ class getData:
                 df['GAME_DATE'] = df['GAME_DATE'].str.split('T').str[0]
                 df['GAME_ID'] = df['GAME_ID'].astype(int)
 
-                return df.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
+                return df.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION']).sort_index()
 
             except Exception as e:
                 time.sleep(random.uniform(1, 3))
@@ -86,6 +86,10 @@ class getData:
             return seasons[0]
 
     def add_features(self, df):
+        '''
+        some light feature encoding/generation
+        could realistically be moved to data processing script
+        '''
 
         df['Home'] = df['MATCHUP'].str.contains('@').map({True: 0, False: 1})
         df['Win'] = df['WL'].map({'W': 1, 'L': 0})
@@ -93,7 +97,7 @@ class getData:
         stats = [
             'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA',
             'OREB', 'DREB', 'REB', 'AST', 'TOV',
-            'STL', 'BLK', 'BLKA', 'PF', 'PFD', 'PTS'
+            'STL', 'BLK', 'BLKA', 'PF', 'PFD', 'PTS', 'PLUS_MINUS'
         ]
 
         # normalize relevant stats to per 48-minutes to correct for overtime games
@@ -148,7 +152,7 @@ class getData:
 
         conn = sqlite3.connect(self.db_path)
 
-        seasons = [f"{y}-{(y % 100) + 1}" for y in range(2022, 2030)]
+        seasons = [f"{y}-{(y % 100) + 1}" for y in range(2012, 2030)]
 
         # construct indicies: grab the most recent season present from the database and get the current season based on today's date
         last_season = self.get_last_updated_season(conn, seasons)

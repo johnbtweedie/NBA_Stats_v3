@@ -129,8 +129,8 @@ class ComputeFeatures:
             # df_feat_existing = df_feat_existing.sort_index(level=['GAME_ID'])
 
             unique_teams = df_feat_existing.index.get_level_values('TEAM_ABBREVIATION').unique()
-            # try:
-            #     unique_teams = unique_teams.drop('NOH')
+            if 'NOH' in unique_teams:
+                unique_teams.drop('NOH')
 
             # get the past 5 games rolling average stats vs the opponent
             print('determining required data for each matchup...')
@@ -806,7 +806,7 @@ class ComputeFeatures:
 
                 print('..complete')
             
-all_features = ComputeFeatures(conn=sqlite3.connect('nba_database_2025-01-18.db'), 
+all_features = ComputeFeatures(conn=sqlite3.connect('nba_database.db'), 
                                purpose='predict',
                                refresh=True)
 
