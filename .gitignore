@@ -1,1 +1,11 @@
 nba_database.db
+*.pyc
+*.pyd
+*.png
+*.pkl
+*.csv
+
+venv/
+.venv/
+__pycache__/
+
