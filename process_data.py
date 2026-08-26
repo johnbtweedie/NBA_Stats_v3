@@ -369,7 +369,7 @@ class ComputeFeatures:
     def tune_rolling_avg(self):
         df = self.features
         df = df.sort_index()
-        print('tuning rolling average')
+        print('tuning rolling average...')
         # Define parameter grid
         p_values = [0, 1, 6, 20]
         d_values = [0, 1, 2, 5]
@@ -405,7 +405,7 @@ class ComputeFeatures:
                 best_error = avg_error
                 best_params = (p, d, q)
 
-        print(f"Best ARIMA parameters: {best_params} with average residual error: {best_error}")
+        print(f'best ARIMA parameters: {best_params} with average residual error: {best_error}')
         # return best_params
     
     def compute_rolling_avg_exog(self, df, window=41):
@@ -458,7 +458,7 @@ class ComputeFeatures:
         optimal_windows = pd.read_csv(r'catalogs/parameters/rolling_average_windows.csv', index_col=0)
         for feature, window in optimal_windows.iterrows():
             window = int(window.values[0])
-            print(feature, window)
+            # print(feature, window)
             
             if not feature in list_of_cols_to_exclude:
                 # Apply the transformation only to the specified columns
@@ -511,7 +511,7 @@ class ComputeFeatures:
 
         # Open and load the pickle file
         for dfm_path in dfm_paths:
-            print('Applying DFM model from', dfm_path)
+            print(f'applying DFM model from {dfm_path}...')
             with open(dfm_path, 'rb') as file:
                 dfm = pickle.load(file)
             endog_1 = dfm['ATL']['endog']
@@ -524,7 +524,7 @@ class ComputeFeatures:
             for team, group in df.groupby('TEAM_ABBREVIATION', group_keys=False):
                 if team != 'NOH': #in ['ATL', 'OKC', 'MIL']:
 
-                    print(team)
+                    # print(team)
                     endog_series = group[endog_1].apply(pd.to_numeric, errors='coerce').dropna().sort_index()  
                     exog_series = df_exog.xs(team, level='TEAM_ABBREVIATION', drop_level=False)[exog_1].dropna().sort_index() 
 
@@ -566,8 +566,8 @@ class ComputeFeatures:
 
                     df.update(filtered_df)
 
-                    print(team, 'complete')
-
+                    # print(team, 'complete')
+        print('...complete')
         return df
 
     def save_current_observations(self):
@@ -654,7 +654,7 @@ class ComputeFeatures:
 
     def save_features(self, db_table_name='feature_table'):
         if self.refresh:
-            print('no existing data detected, creating database table and saving..')
+            print('no existing data detected, creating database table and saving...')
             if db_table_name == 'feature_table':
                 self.features.to_sql(f'{db_table_name}', self.conn, if_exists='replace', index=True)
             elif db_table_name == 'response_table':
@@ -687,10 +687,10 @@ class ComputeFeatures:
 
                 print('saving to database...')
                 df_existing.to_sql(f'{db_table_name}', self.conn, if_exists='replace', index=True)
-                print('..complete')
+                print('...complete')
 
             except pd.io.sql.DatabaseError:
-                print('no existing data detected, creating database table and saving..')
+                print('no existing data detected, creating database table and saving...')
                 if db_table_name == 'feature_table':
                     self.features.to_sql(f'{db_table_name}', self.conn, if_exists='replace', index=True)
                 elif db_table_name == 'response_table':
@@ -698,7 +698,7 @@ class ComputeFeatures:
                 else:
                     print('database table name not recognized')
 
-                print('..complete')
+                print('...complete')
             
 if __name__ == '__main__':
     all_features = ComputeFeatures(conn=sqlite3.connect('nba_database.db'),

@@ -4,26 +4,57 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NBA Game Predictor</title>
-    <!-- Add any CSS stylesheets here -->
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
     <h1>NBA Game Predictor</h1>
-    <form action="/predict" method="post">
-        <label for="team1">Select Home Team:</label>
-        <select name="team1" id="team1">
-            {% for team in teams_list %}
-                <option value="{{ team }}">{{ team }}</option>
-            {% endfor %}
-        </select>
-        <label for="team2">Select Away Team:</label>
-        <select name="team2" id="team2">
-            {% for team in teams_list %}
-                <option value="{{ team }}">{{ team }}</option>
-            {% endfor %}
-        </select>
-        <button type="submit">Predict</button>
-    </form>
-    <!-- Add any additional content here -->
+
+    <div class="controls">
+        <div class="select-group">
+            <label for="away-select">Away Team</label>
+            <select id="away-select">
+                {% for abbr, name in teams_list %}
+                    <option value="{{ abbr }}" {% if loop.index0 == 1 %}selected{% endif %}>{{ name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="select-group">
+            <label for="home-select">Home Team</label>
+            <select id="home-select">
+                {% for abbr, name in teams_list %}
+                    <option value="{{ abbr }}" {% if loop.index0 == 0 %}selected{% endif %}>{{ name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+
+    <div class="frame">
+        <div class="team-column">
+            <img id="away-logo" class="team-logo" src="" alt="Away team logo">
+            <div id="away-name" class="team-name"></div>
+            <div id="away-win-pct" class="stat-value"></div>
+            <div id="away-decimal-odds" class="stat-value"></div>
+            <div id="away-american-odds" class="stat-value"></div>
+        </div>
+
+        <div class="middle-column">
+            <img class="at-logo" src="{{ url_for('logo', abbreviation='at') }}" alt="at">
+            <div class="stat-label">Win Probability</div>
+            <div class="stat-label">Decimal Odds</div>
+            <div class="stat-label">American Odds</div>
+        </div>
+
+        <div class="team-column">
+            <img id="home-logo" class="team-logo" src="" alt="Home team logo">
+            <div id="home-name" class="team-name"></div>
+            <div id="home-win-pct" class="stat-value"></div>
+            <div id="home-decimal-odds" class="stat-value"></div>
+            <div id="home-american-odds" class="stat-value"></div>
+        </div>
+    </div>
+
+    <div id="error-message" class="error-message"></div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

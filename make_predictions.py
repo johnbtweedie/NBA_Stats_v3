@@ -218,7 +218,7 @@ class AssembleModels:
         return results_dict
 
 class AssembleFeatures:
-    def __init__(self, conn=sqlite3.connect('nba_database_2025-01-18.db'), for_custom_matchups=False):
+    def __init__(self, conn=sqlite3.connect('nba_database.db'), for_custom_matchups=False):
         self.conn = conn
         self.data = self.load_data('current_team_data')
         self.prev_data = self.load_data('prev_team_data')

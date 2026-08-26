@@ -1,0 +1,98 @@
+body {
+    background-color: lightgrey;
+    font-family: Helvetica, Arial, sans-serif;
+    text-align: center;
+    margin: 0;
+    padding: 30px 10px;
+}
+
+h1 {
+    font-size: 22px;
+    margin-bottom: 20px;
+}
+
+.controls {
+    display: flex;
+    justify-content: center;
+    gap: 40px;
+    margin-bottom: 25px;
+}
+
+.select-group {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+.select-group label {
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+
+.select-group select {
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 12px;
+    padding: 4px;
+    min-width: 200px;
+}
+
+.frame {
+    display: inline-flex;
+    justify-content: center;
+    align-items: flex-start;
+    background-color: lightgrey;
+    border: 5px solid white;
+    border-radius: 4px;
+    padding: 20px 40px;
+    gap: 40px;
+}
+
+.team-column {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 120px;
+}
+
+.team-logo {
+    width: 100px;
+    height: 100px;
+    object-fit: contain;
+}
+
+.at-logo {
+    width: 50px;
+    height: 50px;
+    object-fit: contain;
+    margin-bottom: 44px;
+}
+
+.team-name {
+    font-size: 12px;
+    margin: 8px 0 14px;
+    font-weight: bold;
+}
+
+.middle-column {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 0;
+}
+
+.stat-label,
+.stat-value {
+    font-size: 10px;
+    height: 20px;
+    line-height: 20px;
+}
+
+.stat-label {
+    color: #444;
+}
+
+.error-message {
+    color: #b00020;
+    font-size: 12px;
+    margin-top: 15px;
+}

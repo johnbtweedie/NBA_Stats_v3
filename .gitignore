@@ -4,7 +4,7 @@ nba_database.db
 *.png
 *.pkl
 *.csv
-
+*.db
 venv/
 .venv/
 __pycache__/
