@@ -9,6 +9,10 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+TEAM_ABVS = ['ATL', 'BOS', 'BRK', 'CHI', 'CHO', 'CLE', 'DAL', 'DEN', 'DET', 'GSW',
+             'HOU', 'IND', 'LAC', 'LAL', 'MEM', 'MIA', 'MIL', 'MIN', 'NOP', 'NYK',
+             'OKC', 'ORL', 'PHI', 'PHX', 'POR', 'SAC', 'SAS', 'TOR', 'UTA', 'WAS']
+
 class ComputeTeamFeatures:
     def __init__(self, conn, purpose='train', refresh=False, tune_rolling_avg=False):
         
@@ -781,6 +785,7 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
         self.meta_features = ['gameId', 'teamId', 'teamCity', 'teamName', 'teamTricode', 'teamSlug',
                                     'personId', 'firstName', 'familyName', 'nameI', 'playerSlug',
                                     'position', 'comment', 'jerseyNum', 'minutes']
+        
     def run(self):
         if self.refresh:
             self.raw_data = self.load_data()
@@ -790,6 +795,7 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
 
         self.compute_features()
         print('features computed')
+
     def load_data(self):
         '''
         load data from sql db with multi-index and datetime GAME_DATE
@@ -805,6 +811,7 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
         df = self.raw_data.copy()
         df = self.format_raw_player_gamelogs(df)
         df = self.rolling_average(df=df, window=8)
+        df = self.construct_top_n_rotation_stats(df=df, n=4)
         print('...complete')
 
     def format_raw_player_gamelogs(self, df):
@@ -848,6 +855,38 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
 
         # Combine the transformed and excluded columns
         return pd.concat([df, df_transformed, df_transformed_no_zero], axis=1)
+    
+    def construct_top_n_rotation_stats(self, df, n=4, usage_stat_col='usagePercentage_ra8'):
+        '''
+        compute the top n players for each team based on minutes played in the last 8 games
+        '''
+        cols_to_transform = df.columns.difference(self.meta_features)
+        df = df.sort_index()
+        df = df.loc[df['teamTricode'].isin(TEAM_ABVS),:] # removes random pre season games
+
+        # for each team, for each game, get the top n players based on rolling usage
+        for team, group in df.groupby('teamId', group_keys=False):
+            print(f'computing top {n} rotation stats for team {team}...')
+            for game_id, game_group in group.groupby('gameId', group_keys=False):
+                game_group = game_group.loc[game_group['comment']==''] # exclude players who did not play in the game (any comment = they didnt play for injury/suspension/rest...)
+                
+                # get the top n players in rotation and assign their stats to new columns in the dataframe
+                top_n_players = game_group.nlargest(n, usage_stat_col).sort_values(usage_stat_col, ascending=False)
+                for player_num in range(1, n+1):
+                    if player_num <= len(top_n_players):
+                        player_row = top_n_players.loc[:,:,].iloc[player_num-1]
+                        for col in cols_to_transform:
+                            df.loc[(game_id, team, player_row.name[2]), f"{col}_top{player_num}"] = player_row[col]
+                    else:
+                        for col in cols_to_transform:
+                            df.loc[(game_id, team), f"{col}_top{player_num}"] = np.nan
+
+                # also take the aggregate mean stats of the top n players and assign to new columns in the dataframe
+                top_n_aggregate = top_n_players[cols_to_transform].mean()
+                for col in cols_to_transform:
+                    df.loc[(game_id, team), f"{col}_top{n}_agg"] = top_n_aggregate[col]
+            print(f'...complete')
+        return df
 
 if __name__ == '__main__':
     print('computing features for player data...')
