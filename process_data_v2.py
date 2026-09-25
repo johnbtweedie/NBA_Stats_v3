@@ -7,15 +7,27 @@ import pickle
 import statsmodels.api as sm
 import warnings
 
+from db_utils import upsert_to_sql
+
 warnings.filterwarnings('ignore')
 
-TEAM_ABVS = ['ATL', 'BOS', 'BRK', 'CHI', 'CHO', 'CLE', 'DAL', 'DEN', 'DET', 'GSW',
+TEAM_ABVS = ['ATL', 'BOS', 'BRK', 'CHI', 'CHA', 'CLE', 'DAL', 'DEN', 'DET', 'GSW',
              'HOU', 'IND', 'LAC', 'LAL', 'MEM', 'MIA', 'MIL', 'MIN', 'NOP', 'NYK',
              'OKC', 'ORL', 'PHI', 'PHX', 'POR', 'SAC', 'SAS', 'TOR', 'UTA', 'WAS']
 
+ARIMA_ORDERS_PATH = 'catalogs/parameters/arima_orders.pkl'
+ARIMA_ENDOG_COLS = ['OffRat', 'DefRat']
+
 class ComputeTeamFeatures:
+    '''
+    feature engineering only: turns raw team gamelogs into contemporaneous, per-team
+    rolling/derived features (a row for (game, team) reflects that team's form as of
+    and including that game). no shifting happens here - see build_datasets.py for
+    how these features get turned into leakage-free training rows vs. unshifted
+    deployment snapshots.
+    '''
     def __init__(self, conn, purpose='train', refresh=False, tune_rolling_avg=False):
-        
+
         # establish columns for various processing steps
         # ra - columns to perform rolling average on
         # opp - columns to use when matching/grabbing opponent stats
@@ -103,25 +115,19 @@ class ComputeTeamFeatures:
         self.features = self.get_opponent_abv(self.features)
         self.previous_games_vs_opponent()
 
-        self.exog_features = self.compute_rolling_avg_exog(self.features)
-        self.exog_features = self.shift_observations(self.exog_features)
-        self.exog_features = self.match_opponent_stats(self.exog_features)
-
         self.features = self.compute_rolling_avg_optimal(df=self.features)
         self.features = self.compute_rolling_avg(df=self.features, window=8)
         self.features = self.compute_rolling_avg(df=self.features, window=16)
         self.features = self.compute_rolling_avg(df=self.features, window=32)
         self.features = self.compute_dfm(df=self.features)
-        self.save_current_observations()
-        self.features = self.shift_observations(self.features)
-        self.features = self.match_opponent_stats(self.features)
+        self.features = self.compute_arima(df=self.features)
         self.save_features()
 
         print('features computed')
 
     def load_required_formatted_data(self):
         try:
-            df_feat_existing = pd.read_sql('SELECT * FROM feature_table', self.conn)
+            df_feat_existing = pd.read_sql('SELECT * FROM team_features', self.conn)
             df_feat_existing = df_feat_existing.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
             # df_feat_existing = df_feat_existing.sort_index(level=['GAME_ID'])
 
@@ -132,12 +138,8 @@ class ComputeTeamFeatures:
             # get the past 5 games rolling average stats vs the opponent
             print('determining required data for each matchup...')
             required_retrieval_index = []
-            cutoff_index_for_saving = []
             for i, team_1 in enumerate(unique_teams):
-                # print('Processing', i + 1, 'of', len(unique_teams), 'teams')
-
                 for team_2 in unique_teams[i + 1:]:
-                    # print(team_1, 'vs.', team_2)
                     df_team_1 = df_feat_existing.xs(team_1, level='TEAM_ABBREVIATION', drop_level=False)
                     df_team_2 = df_feat_existing.xs(team_2, level='TEAM_ABBREVIATION', drop_level=False)
 
@@ -145,25 +147,21 @@ class ComputeTeamFeatures:
 
                     # store 6th most recent games index value
                     required_retrieval_index.append(shared_game_ids[-13]) # we take 13 to ensure enough games are there for each team to populate _prev 6 games rolling avg and all DaysRest correctly
-                    cutoff_index_for_saving.append(shared_game_ids[-6]) # we will get rid of this extra game data before resaving to the db, this removes DaysRest diff() artifacts
             print('...complete')
-            
+
             print('loading required data from database...')
             max_required_retrieval_index = pd.to_numeric(
                 required_retrieval_index).min()  # index of the least recent game we have to grab data from
             df = pd.read_sql(
                 f"SELECT * FROM team_gamelogs WHERE CAST(GAME_ID AS INTEGER) >= {max_required_retrieval_index}",
                 self.conn)
-            features_exist = True
             print('...complete')
-        except:
+        except (pd.errors.DatabaseError, sqlite3.OperationalError):
             print('no existing features detected, computing for full dataset')
             df = pd.read_sql(f"SELECT * FROM team_gamelogs", self.conn)
-            features_exist = False
 
         df = self.format_team_gamelogs(df)
 
-        self.cutoff_index_for_saving = pd.to_numeric(cutoff_index_for_saving).min()
         return df
 
     def load_data(self):
@@ -173,7 +171,6 @@ class ComputeTeamFeatures:
 
         df = pd.read_sql(f"SELECT * FROM team_gamelogs", self.conn)
         df = self.format_team_gamelogs(df)
-        self.cutoff_index_for_saving = pd.to_numeric(df.index.get_level_values(1).min())
 
         return df
 
@@ -266,7 +263,7 @@ class ComputeTeamFeatures:
             df.groupby('GAME_ID')['TEAM_ABBREVIATION_TEMP']
             .transform(lambda x: x[::-1].values)
         )
-        
+
         df.drop(columns=['TEAM_ABBREVIATION_TEMP'], inplace=True)
 
         return df
@@ -291,13 +288,10 @@ class ComputeTeamFeatures:
 
         df['WL_r'] = self.raw_data['WL']
 
-        # clip this to index from final feature set to prevent leakage in training
         print('...complete')
 
         self.response = df
-        self.save_features(db_table_name='response_table')
-        
-        # return df
+        upsert_to_sql(self.response, self.conn, 'response_table', pk_cols=['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
 
     def compute_features(self):
         '''
@@ -308,11 +302,6 @@ class ComputeTeamFeatures:
 
         df_feat = self.raw_data.copy()
         df_feat = df_feat[self.ra_cols]
-
-        # # if enabled, shift by one game so we can produce suitable training data (i.e. data to predict current game is from the game before/pre-current game)
-        # if self.shift:
-        #     df_feat[self.ra_cols] = df_feat[self.ra_cols].shift(1) 
-        # will do this later instead
 
         df_feat['OER'] = df_feat['PTS_per48'] / (df_feat['FGA_per48'] +
                                                 ((df_feat['FTA_per48']*0.9)/2) -
@@ -340,7 +329,7 @@ class ComputeTeamFeatures:
         df_feat[['MATCHUP','WL']] = self.raw_data[['MATCHUP','WL']]
         df_feat['Home'] = df_feat['MATCHUP'].apply(lambda x: 0 if '@' in x else 1)
         df_feat.drop(columns=['MATCHUP'], inplace=True)
-        
+
 
         def consecutive_zeros(lst):
             count = 0
@@ -387,12 +376,12 @@ class ComputeTeamFeatures:
         # WIP: BB%, ball-back %, pct chance team will get the ball back from the opponent on a possession
         df_feat['BB%'] = (df_feat['TOV_per48_against'] +
                         (df_feat['FGA_per48_against'] -
-                        df_feat['FGM_per48_against'])) / df_feat['Poss']        
-        
+                        df_feat['FGM_per48_against'])) / df_feat['Poss']
+
         self.features = df_feat
         self.feature_list = df_feat.columns.to_list()
         print('...complete')
-    
+
     def leaguewide_standardization(self, window=1230):
         '''
         standardize [cols] columns based on the [window]-game rolling mean and stdev across all teams
@@ -413,13 +402,11 @@ class ComputeTeamFeatures:
         # leaguewide rolling standardization
         window = 960
         for col in cols:
-            # print(col+'_z')
             df_feat[(col+'_z')] = ((df_feat[col] -
                                     (df_feat[col].transform(lambda x: x.rolling(window=window).mean()))) /
                                 df_feat[col].transform(lambda x: x.rolling(window=window).std()))
-            
+
         self.features = df_feat
-        # return df_feat
 
     def previous_games_vs_opponent(self, ngames=6):
         '''
@@ -443,67 +430,73 @@ class ComputeTeamFeatures:
 
         self.features = df_feat
         print('...complete')
-    
-    def tune_rolling_avg(self):
-        df = self.features
-        df = df.sort_index()
-        print('tuning rolling average...')
-        # Define parameter grid
+
+    def tune_arima_orders(self, endog_cols=ARIMA_ENDOG_COLS, save_path=ARIMA_ORDERS_PATH):
+        '''
+        grid-search the best ARIMA(p,d,q) order per endog column (by average one-step-ahead
+        forecast error across teams), and cache the winning orders to save_path for
+        compute_arima() to consume. not called from run() - this is a standalone tuning
+        step to be run manually whenever the feature set changes meaningfully.
+        '''
+        df = self.features.sort_index()
+        print('tuning ARIMA orders...')
         p_values = [0, 1, 6, 20]
         d_values = [0, 1, 2, 5]
         q_values = [0, 1, 10, 40]
         param_grid = list(product(p_values, d_values, q_values))
 
-        best_params = None
-        best_error = float('inf')
+        arima_orders = {}
+        for endog_col in endog_cols:
+            best_params = None
+            best_error = float('inf')
 
-        # Iterate over all (p,d,q) combinations
-        for p, d, q in param_grid:
-            total_error = 0
-            num_teams = 0
+            for p, d, q in param_grid:
+                total_error = 0
+                num_teams = 0
 
-            for team, group in df.groupby('TEAM_ABBREVIATION', group_keys=False):
-                try:
-                    # Convert index to datetime if necessary
-                    group = group.copy()
-                    if not isinstance(group.index, pd.DatetimeIndex):
-                        group.index = pd.to_datetime(group.index, errors='coerce')  # Ensure datetime format
-                    
-                    model = ARIMA(group['DefRat'], order=(p, d, q)).fit()
-                    forecast = model.forecast()
-                    residual_error = np.abs(group['DefRat'].iloc[-1] - forecast.iloc[0])
-                    total_error += residual_error
-                    num_teams += 1
-                except Exception as e:
-                    continue  # Skip if model fails
+                for team, group in df.groupby('TEAM_ABBREVIATION', group_keys=False):
+                    try:
+                        series = group[endog_col].dropna().reset_index(drop=True)
+                        model = ARIMA(series, order=(p, d, q)).fit()
+                        forecast = model.forecast()
+                        residual_error = np.abs(series.iloc[-1] - forecast.iloc[0])
+                        total_error += residual_error
+                        num_teams += 1
+                    except Exception:
+                        continue  # Skip if model fails
 
-            avg_error = total_error / num_teams if num_teams > 0 else float('inf')
+                avg_error = total_error / num_teams if num_teams > 0 else float('inf')
 
-            if avg_error < best_error:
-                best_error = avg_error
-                best_params = (p, d, q)
+                if avg_error < best_error:
+                    best_error = avg_error
+                    best_params = (p, d, q)
 
-        print(f'best ARIMA parameters: {best_params} with average residual error: {best_error}')
-        # return best_params
-    
+            print(f'best ARIMA order for {endog_col}: {best_params} (avg residual error: {best_error})')
+            arima_orders[endog_col] = best_params
+
+        with open(save_path, 'wb') as f:
+            pickle.dump(arima_orders, f)
+        print(f'saved ARIMA orders to {save_path}')
+        return arima_orders
+
     def compute_rolling_avg_exog(self, df, window=41):
         '''
         compute [window]-game rolling average for all teams for exogenous features
-        this is passed to the rolling average tuning script
+        used internally by compute_dfm as the DFM's exogenous input
         '''
         df = df.sort_index()
         list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed', 'oppAbv']
-        
+
         # exogenous features rolling average
         # define the exogenous (opponent) features for the time series model below
-        cols_to_transform = ['OER', 'DER', 'eFG%', 'eFG%_against', 'TS%', 'TS%_against',	
-                                'DaysElapsed', 'DaysRest', 'WL', 'Poss', 'OffRat', 'DefRat',	
+        cols_to_transform = ['OER', 'DER', 'eFG%', 'eFG%_against', 'TS%', 'TS%_against',
+                                'DaysElapsed', 'DaysRest', 'WL', 'Poss', 'OffRat', 'DefRat',
                                 'OREB%', 'DREB%', 'TOV%', 'TOV_forced%', 'STL%', 'AST%', 'BB%',
-                                'eFG%_z', 'eFG%_against_z', 'TS%_z', 'TS%_against_z',	
-                                'Poss_z', 'OffRat_z', 'DefRat_z',	'roadtrip', #'Home', 
+                                'eFG%_z', 'eFG%_against_z', 'TS%_z', 'TS%_against_z',
+                                'Poss_z', 'OffRat_z', 'DefRat_z',	'roadtrip', #'Home',
                                 'OREB%_z', 'DREB%_z', 'TOV%_z', 'TOV_forced%_z', 'STL%_z', 'AST%_z']
 
-        
+
         # Apply the transformation only to the specified columns
         df_transformed = (
             df.groupby('TEAM_ABBREVIATION', group_keys=False)
@@ -511,33 +504,35 @@ class ComputeTeamFeatures:
         )
 
         df_transformed = df_transformed[cols_to_transform].add_suffix('_exog')
-        
+
         # Keep the excluded columns intact
         if 'oppAbv' in df.columns:
             df_excluded = df[list_of_cols_to_exclude]
         else:
             list_of_cols_to_exclude.remove('oppAbv')
             df_excluded = df[list_of_cols_to_exclude]
-        
+
         # Combine the transformed and excluded columns
         return pd.concat([df_excluded, df_transformed], axis=1)
-    
+
     def compute_rolling_avg_optimal(self, df):
         '''
         compute [window]-game rolling average for all teams for [features] columns
+        skips entirely if the optimal windows CSV hasn't been provided
         '''
+        try:
+            optimal_windows = pd.read_csv(r'catalogs/parameters/rolling_average_windows.csv', index_col=0)
+        except FileNotFoundError:
+            print('no optimal rolling window file found, skipping optimal-window features')
+            return df
+
         df = df.sort_index()
         list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed', 'oppAbv']
         list_of_cols_to_exclude.extend([col for col in df.columns if '_prev' in col])
-        cols_to_transform = df.columns.difference(list_of_cols_to_exclude)
 
-
-        # compute optimal window rolling averages
-        optimal_windows = pd.read_csv(r'catalogs/parameters/rolling_average_windows.csv', index_col=0)
         for feature, window in optimal_windows.iterrows():
             window = int(window.values[0])
-            # print(feature, window)
-            
+
             if not feature in list_of_cols_to_exclude:
                 # Apply the transformation only to the specified columns
                 df_transformed = (
@@ -547,9 +542,9 @@ class ComputeTeamFeatures:
 
                 new_label = feature + '_raop'
                 df[new_label] = df_transformed
-        
+
         return df
-        
+
     def compute_rolling_avg(self, df, window=None):
         '''
         compute [window]-game rolling average for all teams for [features] columns
@@ -559,7 +554,7 @@ class ComputeTeamFeatures:
         list_of_cols_to_exclude.extend([col for col in df.columns if '_prev' in col])
         list_of_cols_to_exclude.extend([col for col in df.columns if '_ra' in col])
         cols_to_transform = df.columns.difference(list_of_cols_to_exclude)
-        
+
         # Apply the transformation only to the specified columns
         df_transformed = (
             df.groupby('TEAM_ABBREVIATION', group_keys=False)
@@ -568,215 +563,160 @@ class ComputeTeamFeatures:
         new_label = '_ra' +str(window)
         df_transformed = df_transformed[cols_to_transform].add_suffix(new_label)
 
-        # # Keep the excluded columns intact
-        # if 'oppAbv' in df.columns:
-        #     df_excluded = df[list_of_cols_to_exclude]
-        # else:
-        #     list_of_cols_to_exclude.remove('oppAbv')
-        #     df_excluded = df[list_of_cols_to_exclude]
-        
         # Combine the transformed and excluded columns
         return pd.concat([df, df_transformed], axis=1)
-    
+
+    def _flip_to_opponent(self, df, exclude_cols=('oppAbv',)):
+        '''
+        for each column (except exclude_cols), add a same-named _opp column holding
+        that row's opponent's value for the same game (assumes exactly two rows per
+        GAME_ID) - used by compute_dfm to build opponent-matched exog inputs
+        '''
+        cols_to_flip = [col for col in df.columns if col not in exclude_cols]
+        opp_df = (
+            df[cols_to_flip]
+            .groupby('GAME_ID')
+            .transform(lambda x: x[::-1].values)
+            .add_suffix('_opp')
+        )
+        return pd.concat([df, opp_df], axis=1)
+
     def compute_dfm(self, df):
         '''
         apply the fitted DFM time series models to relevant feature columns
+        skips entirely if the DFM parameter pickles haven't been provided
+
+        exog inputs are lagged by one game per team before fitting, so the resulting
+        _dfm columns already reflect only information available before the game they're
+        attached to - they must NOT be shifted again downstream (see build_datasets.py)
+
+        the exog inputs also include opponent-matched (_opp) versions of some trailing
+        stats - fitted DFMs may condition a team's factors on their opponent's form
         '''
-        # df = df.sort_index()
-        df_exog = self.exog_features.copy()
-
         dfm_paths = ['catalogs/parameters/dfm_1.pkl', 'catalogs/parameters/dfm_2.pkl']
-
-        # Open and load the pickle file
+        dfms = []
         for dfm_path in dfm_paths:
-            print(f'applying DFM model from {dfm_path}...')
-            with open(dfm_path, 'rb') as file:
-                dfm = pickle.load(file)
+            try:
+                with open(dfm_path, 'rb') as file:
+                    dfms.append(pickle.load(file))
+            except FileNotFoundError:
+                print(f'no DFM parameter file found at {dfm_path}, skipping DFM features')
+                return df
+
+        df_exog = self.compute_rolling_avg_exog(df)
+
+        # lag the rolling-average exog columns by one game per team so they only ever
+        # reflect information available before the game they're attached to - the raw
+        # pass-through columns (Home, roadtrip, DaysRest, DaysElapsed, oppAbv) stay
+        # contemporaneous, matching how they're treated everywhere else in the pipeline
+        exog_cols_to_shift = [c for c in df_exog.columns if c.endswith('_exog')]
+        df_exog[exog_cols_to_shift] = (
+            df_exog.groupby('TEAM_ABBREVIATION', group_keys=False)[exog_cols_to_shift]
+            .apply(lambda g: g.shift(1))
+        )
+        df_exog = self._flip_to_opponent(df_exog)
+
+        for dfm in dfms:
             endog_1 = dfm['ATL']['endog']
             exog_1 = dfm['ATL']['exog']
             exog_ra8 = [x for x in exog_1 if '_ra8' in x]
             exog_ra32 = [x for x in exog_1 if '_ra32' in x]
             exog_1 = [x for x in exog_1 if not '_ra' in x]
 
-            # unique_teams = df['TEAM_ABBREVIATION'].unique()
             for team, group in df.groupby('TEAM_ABBREVIATION', group_keys=False):
-                if team != 'NOH': #in ['ATL', 'OKC', 'MIL']:
+                if team not in dfm:
+                    continue
 
-                    # print(team)
-                    endog_series = group[endog_1].apply(pd.to_numeric, errors='coerce').dropna().sort_index()  
-                    exog_series = df_exog.xs(team, level='TEAM_ABBREVIATION', drop_level=False)[exog_1].dropna().sort_index() 
+                endog_series = group[endog_1].apply(pd.to_numeric, errors='coerce').dropna().sort_index()
+                exog_series = (
+                    df_exog.xs(team, level='TEAM_ABBREVIATION', drop_level=False)[exog_1]
+                    .dropna()
+                    .sort_index()
+                )
 
-                    for feature in exog_ra8:
-                        exog_series[feature] = endog_series[feature.split('_ra')[0]].rolling(window=8).mean().shift(1)
-                    for feature in exog_ra32:
-                        exog_series[feature] = endog_series[feature.split('_ra')[0]].rolling(window=32).mean().shift(1)
+                for feature in exog_ra8:
+                    exog_series[feature] = endog_series[feature.split('_ra')[0]].rolling(window=8).mean().shift(1)
+                for feature in exog_ra32:
+                    exog_series[feature] = endog_series[feature.split('_ra')[0]].rolling(window=32).mean().shift(1)
 
-                    exog_series = exog_series.dropna()
-                    endog_series = endog_series.dropna()
-                    common_indices = exog_series.index.intersection(endog_series.index)
+                exog_series = exog_series.dropna()
+                endog_series = endog_series.dropna()
+                common_indices = exog_series.index.intersection(endog_series.index)
 
-                    exog_series = exog_series.loc[common_indices]
-                    endog_series = endog_series.loc[common_indices]
+                exog_series = exog_series.loc[common_indices]
+                endog_series = endog_series.loc[common_indices]
 
-                    exog_series = exog_series.reset_index(drop=True)
-                    endog_series = endog_series.reset_index(drop=True)
+                exog_series = exog_series.reset_index(drop=True)
+                endog_series = endog_series.reset_index(drop=True)
 
-                    k_factors = dfm[team]["k_factors"]
-                    factor_order = dfm[team]["factor_order"]
-                    params = dfm[team]['params']
+                k_factors = dfm[team]["k_factors"]
+                factor_order = dfm[team]["factor_order"]
+                params = dfm[team]['params']
 
-                    # Apply the fitted model's parameters to the new data using filtering
-                    mod = sm.tsa.DynamicFactor(
-                        endog=endog_series,
-                        exog=exog_series,
-                        k_factors=k_factors,
-                        factor_order=factor_order
-                    )
+                # Apply the fitted model's parameters to the new data using filtering
+                mod = sm.tsa.DynamicFactor(
+                    endog=endog_series,
+                    exog=exog_series,
+                    k_factors=k_factors,
+                    factor_order=factor_order
+                )
 
-                    transformed_result = mod.filter(params)
-                    filtered_df = transformed_result.fittedvalues.copy()
-                    filtered_df.index = common_indices  # if needed
-                    filtered_df = filtered_df.add_suffix('_dfm')
+                transformed_result = mod.filter(params)
+                filtered_df = transformed_result.fittedvalues.copy()
+                filtered_df.index = common_indices
+                filtered_df = filtered_df.add_suffix('_dfm')
 
-                    for col in filtered_df.columns:
-                        if col not in df:
-                            df[col] = np.nan
+                for col in filtered_df.columns:
+                    if col not in df:
+                        df[col] = np.nan
 
-                    df.update(filtered_df)
-
-                    # print(team, 'complete')
+                df.update(filtered_df)
         print('...complete')
         return df
 
-    def save_current_observations(self):
+    def compute_arima(self, df, endog_cols=ARIMA_ENDOG_COLS, params_path=ARIMA_ORDERS_PATH):
         '''
-        store the unshifted observations to use in next game predictions
-        '''   
-        print('storing data for current predictions...')
+        fit an ARIMA(p,d,q) per team per endog column and add its one-step-ahead
+        in-sample forecast as a {col}_arima feature. statsmodels' state-space ARIMA
+        fittedvalues are one-step-ahead in-sample predictions (using data through the
+        prior game), so this is already leakage-safe and must NOT be shifted again
+        downstream (see build_datasets.py).
 
-        # generate column for opponents abbreviation
-        df = self.features#.reset_index()
-        # df['oppAbv'] = (
-        #     df.groupby('GAME_ID')['TEAM_ABBREVIATION']
-        #     .transform(lambda x: x[::-1].values)
-        # )
-        # df = df.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
-        # self.features = df
-        
-        # groupby teams and get their current stats
-        # includes their home/away status, roadtrip status, days of rest, and the rolling averages of the stats (including the most recent game played)
-        # df_current = self.features.loc[:, ~self.features.columns.str.contains('_prev')] # enable to exclude prev columns
-        # df_current = df_current.groupby(level='TEAM_ABBREVIATION').tail(1)
-        
-        df_current = df.groupby(level='TEAM_ABBREVIATION').tail(1)
-        df_current.to_sql('current_team_data', self.conn, if_exists='replace', index=True)
-
-        # get most recent prev stats for all teams and their opponents
-        df_prev = df.loc[:,df.columns.str.contains('_prev|oppAbv')]
-        df_prev = (
-            df_prev.groupby(['TEAM_ABBREVIATION', 'oppAbv']).tail(1)
-        )
-        df_prev.to_sql('prev_team_data', self.conn, if_exists='replace', index=True)
-
-        # Home and roadtrip are not applicable to current night predictions, we must determine this at that stage
-        print('...complete')
-    
-    def shift_observations(self, df):
+        skips entirely if the ARIMA orders haven't been tuned/provided yet (see
+        tune_arima_orders).
         '''
-        shift befiore or after opponent matching????
-        '''
-        print('shifting features by one game...')
-        # df = self.features
+        try:
+            with open(params_path, 'rb') as f:
+                arima_orders = pickle.load(f)
+        except FileNotFoundError:
+            print(f'no ARIMA order file found at {params_path}, skipping ARIMA features')
+            return df
 
-        # group by teams, shift features by one game
-        df_shift_by_team = df.sort_index()
-        list_of_cols_to_exclude = ['Home', 'roadtrip', 'DaysRest', 'DaysElapsed', 'oppAbv', 'WL']
-        list_of_cols_to_exclude.extend([col for col in df.columns if '_prev' in col])
+        df = df.sort_index()
+        for col in endog_cols:
+            order = arima_orders.get(col)
+            if order is None:
+                continue
 
-        # Columns to apply the transformation
-        cols_to_transform = df.columns.difference(list_of_cols_to_exclude)
-        
-        df_shift_by_team = (
-            df_shift_by_team.groupby(['TEAM_ABBREVIATION'], group_keys=False)
-            .apply(lambda group: group[cols_to_transform].shift(1))
-        )
-        
-        # group by teams and each unique opponent, shift '_prev' and by 1
-        df_shift_by_team_opp = df.loc[:,df.columns.str.contains('_prev|oppAbv')]
-        df_shift_by_team_opp = (
-            df_shift_by_team_opp.groupby(['TEAM_ABBREVIATION', 'oppAbv'], group_keys=False)
-            .apply(lambda group: group.shift(1))
-        )
-        df.update(df_shift_by_team)
-        df.update(df_shift_by_team_opp)
+            print(f'fitting ARIMA{order} for {col}...')
+            forecasts = []
+            for team, group in df.groupby('TEAM_ABBREVIATION', group_keys=False):
+                series = group[col].dropna()
+                if len(series) < 20:
+                    continue
+                try:
+                    fitted = ARIMA(series.reset_index(drop=True), order=order).fit().fittedvalues
+                    fitted.index = series.index
+                    forecasts.append(fitted)
+                except Exception as e:
+                    print(f'ARIMA fit failed for {team}/{col}: {e}')
 
-        # self.features = df
-        print('...complete')
+            if forecasts:
+                df[f'{col}_arima'] = pd.concat(forecasts)
         return df
-    
-    def match_opponent_stats(self, df_feat):
-        df_feat = df_feat.dropna().sort_index()
 
-        cols_to_flip = [col for col in df_feat.columns if col not in {'WL', 'oppAbv'}]
-        opp_df = (
-            df_feat[cols_to_flip]
-            .groupby('GAME_ID')
-            .transform(lambda x: x[::-1].values)
-            .add_suffix('_opp')
-        )
-        df_feat = pd.concat([df_feat, opp_df], axis=1)
-
-        last_missing_idx = df_feat[df_feat.isnull().any(axis=1)].index.max()
-        df_feat_truncated = df_feat.loc[last_missing_idx:] if last_missing_idx is not None else df_feat
-        return df_feat_truncated.dropna()
-
-    def save_features(self, db_table_name='feature_table'):
-        if self.refresh:
-            print('no existing data detected, creating database table and saving...')
-            if db_table_name == 'feature_table':
-                self.features.to_sql(f'{db_table_name}', self.conn, if_exists='replace', index=True)
-            elif db_table_name == 'response_table':
-                self.response.to_sql(f'{db_table_name}', self.conn, if_exists='replace', index=True)
-            else:
-                print('database table name not recognized')
-        else:
-            try:
-                df_existing = pd.read_sql(f'SELECT * FROM {db_table_name}', self.conn)
-                # df_existing.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
-
-                df_existing['GAME_ID'] = df_existing['GAME_ID'].astype('int')
-                df_existing.set_index(['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'], inplace=True)
-
-                if 'level_0' in df_existing.columns:
-                    df_existing.drop('level_0', axis=1, inplace=True)
-                if 'index' in df_existing.columns:
-                    df_existing.drop('index', axis=1, inplace=True)
-
-                if db_table_name == 'feature_table':
-                    df_existing.update(self.features)
-                elif db_table_name == 'response_table':
-                    df_existing.update(self.response)
-                else:
-                    print('database table name not recognized')
-
-                df_existing = df_existing[~df_existing.index.duplicated(keep='last')]
-                df_existing = df_existing.sort_index(level=['GAME_ID'])
-                # combined_data = combined_data.sort_values(by='GAME_ID')
-
-                print('saving to database...')
-                df_existing.to_sql(f'{db_table_name}', self.conn, if_exists='replace', index=True)
-                print('...complete')
-
-            except pd.io.sql.DatabaseError:
-                print('no existing data detected, creating database table and saving...')
-                if db_table_name == 'feature_table':
-                    self.features.to_sql(f'{db_table_name}', self.conn, if_exists='replace', index=True)
-                elif db_table_name == 'response_table':
-                    self.response.to_sql(f'{db_table_name}', self.conn, if_exists='replace', index=True)
-                else:
-                    print('database table name not recognized')
-
-                print('...complete')
+    def save_features(self):
+        upsert_to_sql(self.features, self.conn, 'team_features', pk_cols=['GAME_DATE', 'GAME_ID', 'TEAM_ABBREVIATION'])
 
 class ComputePlayerFeatures(ComputeTeamFeatures):
     def __init__(self, conn, purpose='predict', refresh=False):
@@ -785,7 +725,7 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
         self.meta_features = ['gameId', 'teamId', 'teamCity', 'teamName', 'teamTricode', 'teamSlug',
                                     'personId', 'firstName', 'familyName', 'nameI', 'playerSlug',
                                     'position', 'comment', 'jerseyNum', 'minutes']
-        
+
     def run(self):
         if self.refresh:
             self.raw_data = self.load_data()
@@ -794,6 +734,7 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
             print('data loaded')
 
         self.compute_features()
+        self.save_features()
         print('features computed')
 
     def load_data(self):
@@ -801,7 +742,7 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
         load data from sql db with multi-index and datetime GAME_DATE
         '''
         return pd.read_sql(f"SELECT * FROM player_gamelogs", self.conn).set_index(['gameId', 'teamId', 'personId']).sort_index()
-    
+
     def compute_features(self):
         '''
         compute various features for model training
@@ -811,7 +752,8 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
         df = self.raw_data.copy()
         df = self.format_raw_player_gamelogs(df)
         df = self.rolling_average(df=df, window=8)
-        df = self.construct_top_n_rotation_stats(df=df, n=4)
+        self.features = df
+        self.rotation_features = self.build_rotation_table(df=df, n=4)
         print('...complete')
 
     def format_raw_player_gamelogs(self, df):
@@ -819,22 +761,16 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
         turn raw player gamelogs (as stored by pull_data_db_v2.py) into the formatted data:
         per-48 features and opponent stats added, multi-index and datetime GAME_DATE
         '''
-        cols_to_transform = df.columns.difference(self.meta_features)
         df['minutes_decimal'] = df['minutes'].apply(lambda x: int(x.split(':')[0]) + int(x.split(':')[1])/60 if x is not None and x != '' else 0)
 
-        # block below is not needed for this current dataset as all features are already rates
-        # df['minutes_48_fraction'] = df['minutes_decimal'] / 48
-        # for col in cols_to_transform:
-        #     df[f"{col}_per48"] = (df[col] / df['minutes_48_fraction']).round(3)
-        # df = df.drop(columns=['minutes_48_fraction'])
-        return df        
+        return df
 
     def rolling_average(self, df, window=8):
         '''
         compute [window]-game rolling average for all players for [features] columns
         '''
         cols_to_transform = df.columns.difference(self.meta_features)
-        
+
         # get rolling average for all players, for team's last n games played (not excluding games where they did not play (i.e. minutes = 0))
         df_transformed = (
             df.groupby('personId', group_keys=False)
@@ -855,38 +791,38 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
 
         # Combine the transformed and excluded columns
         return pd.concat([df, df_transformed, df_transformed_no_zero], axis=1)
-    
-    def construct_top_n_rotation_stats(self, df, n=4, usage_stat_col='usagePercentage_ra8'):
+
+    def build_rotation_table(self, df, n=4, usage_stat_col='usagePercentage_ra8'):
         '''
-        compute the top n players for each team based on minutes played in the last 8 games
+        compact (gameId, teamId)-indexed table of the top n rotation players' stats
+        (by rolling usage) for each team in each game, plus their aggregate mean -
+        these are static, per-team-per-game features derived from player gamelogs,
+        distinct from the full per-player rolling feature table
         '''
         cols_to_transform = df.columns.difference(self.meta_features)
         df = df.sort_index()
-        df = df.loc[df['teamTricode'].isin(TEAM_ABVS),:] # removes random pre season games
+        df = df.loc[df['teamTricode'].isin(TEAM_ABVS), :]  # removes random pre season games
 
-        # for each team, for each game, get the top n players based on rolling usage
-        for team, group in df.groupby('teamId', group_keys=False):
-            print(f'computing top {n} rotation stats for team {team}...')
-            for game_id, game_group in group.groupby('gameId', group_keys=False):
-                game_group = game_group.loc[game_group['comment']==''] # exclude players who did not play in the game (any comment = they didnt play for injury/suspension/rest...)
-                
-                # get the top n players in rotation and assign their stats to new columns in the dataframe
-                top_n_players = game_group.nlargest(n, usage_stat_col).sort_values(usage_stat_col, ascending=False)
-                for player_num in range(1, n+1):
-                    if player_num <= len(top_n_players):
-                        player_row = top_n_players.loc[:,:,].iloc[player_num-1]
-                        for col in cols_to_transform:
-                            df.loc[(game_id, team, player_row.name[2]), f"{col}_top{player_num}"] = player_row[col]
-                    else:
-                        for col in cols_to_transform:
-                            df.loc[(game_id, team), f"{col}_top{player_num}"] = np.nan
+        def top_n_row(game_group):
+            game_group = game_group.loc[game_group['comment'] == '']  # exclude players who didn't play
+            top_n_players = game_group.nlargest(n, usage_stat_col)
 
-                # also take the aggregate mean stats of the top n players and assign to new columns in the dataframe
-                top_n_aggregate = top_n_players[cols_to_transform].mean()
+            row = {}
+            for player_num, (_, player_row) in enumerate(top_n_players.iterrows(), start=1):
                 for col in cols_to_transform:
-                    df.loc[(game_id, team), f"{col}_top{n}_agg"] = top_n_aggregate[col]
-            print(f'...complete')
-        return df
+                    row[f'{col}_top{player_num}'] = player_row[col]
+            for col in cols_to_transform:
+                row[f'{col}_top{n}_agg'] = top_n_players[col].mean()
+            return pd.Series(row)
+
+        print(f'computing top {n} rotation stats...')
+        rotation = df.groupby(['gameId', 'teamId'], group_keys=True).apply(top_n_row)
+        print('...complete')
+        return rotation
+
+    def save_features(self):
+        upsert_to_sql(self.features, self.conn, 'player_features', pk_cols=['gameId', 'teamId', 'personId'])
+        upsert_to_sql(self.rotation_features, self.conn, 'team_rotation_features', pk_cols=['gameId', 'teamId'])
 
 if __name__ == '__main__':
     print('computing features for player data...')
@@ -894,11 +830,12 @@ if __name__ == '__main__':
                                        purpose='predict',
                                        refresh=True)
     PlayerFeatures.run()
-    print('complete')
+    print('player features complete')
 
     print('computing features for team data...')
     TeamFeatures = ComputeTeamFeatures(conn=sqlite3.connect('nba_database_test.db'),
                                    purpose='predict',
                                    refresh=True)
     TeamFeatures.run()
-    print('complete')
+    print('team features complete')
+    print('all features computed and saved to database')

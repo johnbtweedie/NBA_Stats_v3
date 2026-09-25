@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import GridSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.linear_model import LogisticRegression, ElasticNet, Ridge
@@ -91,7 +91,7 @@ def holdout_classification_performance(y_test, y_prob, model_name, model_call):
 
 class trainModel:
     def __init__(self, 
-                 conn=sqlite3.connect('nba_database_2025-01-18.db'),
+                 conn=sqlite3.connect('nba_database_test.db'),
                  model_type='classification',
                  target_response='WL',
                  scale=True,
@@ -99,15 +99,13 @@ class trainModel:
                  dense_grid=True):
         
         self.conn = conn
-        
-        self.features = self.load_data('feature_table')
+
+        self.dataset = self.load_data('modeling_dataset')
         self.process_features()
-        
-        self.responses = self.load_data('response_table')
-        self.process_response(target_response)
 
         self.response = target_response
-        
+        self.process_response(target_response)
+
         self.test_train_split()
         self.scaler_used = False
         self.pca_used = False
@@ -136,51 +134,47 @@ class trainModel:
         print('...complete\n')
         return df
 
-    def process_features(self, use_all=False):
+    def process_features(self, feature_set='basic_v1', use_all=False):
         '''
         prune and process feature set
         '''
         print('processing feature data...')
-        feature_cols = pd.read_excel(r'/Users/johntweedie/Dev/Projects/PN24001_NBA_Stats/catalogs/features_cols.xlsx',
-                             sheet_name='feat_2024-05-22_v1.0')['feature_cols'].tolist()
+        feature_cols = pd.read_excel(r'NBA_Stats_v3/catalogs/parameters/feature_sets.xlsx',
+                             sheet_name=feature_set)['feature_cols'].tolist()
         feature_cols = [col.strip().replace("'", "") for col in feature_cols]
-        self.features = self.features.dropna()
-        # self.features = self.features.drop(columns='DaysElapsed')
-        if not use_all:            
-            self.features = self.features[feature_cols]
+        self.dataset = self.dataset.dropna()
+        self.dataset_split = self.dataset['dataset_split']
+        if not use_all:
+            self.features = self.dataset[feature_cols]
+        else:
+            self.features = self.dataset.drop(columns=['dataset_split'])
         print('...complete\n')
 
     def process_response(self, target_response):
         print('procesing response data...')
-        self.responses = self.responses.loc[self.features.index]
-        self.responses = self.responses[f'{target_response}_r']
+        self.responses = self.dataset.loc[self.features.index, f'{target_response}_r']
         print('...complete\n')
 
-    def test_train_split(self, test_size=0.2, holdout=True, n_games=1000):
+    def test_train_split(self, holdout=True):
+        '''
+        split into train/test/validation using the dataset_split column assigned by
+        build_datasets.py (chronological holdout for validation, random train/test split
+        of the remainder) rather than re-deriving the split here
+        '''
         print('segmenting test/train sets...')
-        # Determine holdout and training/test split
-        self.holdout = False
+        self.holdout = holdout
+        split = self.dataset_split.loc[self.features.index]
+
+        self.data_dict = {}
         if holdout:
-            self.holdout = True
-            self.data_dict = {
-                'X_hold': self.features.iloc[-n_games:],
-                'y_hold': self.responses.iloc[-n_games:],
-            }
-            X_data, y_data = self.features.iloc[:-n_games], self.responses.iloc[:-n_games]
-        else:
-            X_data, y_data = self.features, self.responses
+            self.data_dict['X_hold'] = self.features[split == 'validation']
+            self.data_dict['y_hold'] = self.responses[split == 'validation']
 
-        # Perform train-test split
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_data, y_data, test_size=test_size, random_state=100
-        )
-
-        # Store results in data dictionary
         self.data_dict.update({
-            'X_train': X_train,
-            'X_test': X_test,
-            'y_train': y_train,
-            'y_test': y_test
+            'X_train': self.features[split == 'train'],
+            'X_test': self.features[split == 'test'],
+            'y_train': self.responses[split == 'train'],
+            'y_test': self.responses[split == 'test'],
         })
         print('...complete\n')
 
@@ -212,6 +206,7 @@ class trainModel:
         eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
         sorted_eigenvalues = np.sort(eigenvalues)[::-1]
         num_components_kaiser = sum(sorted_eigenvalues > 1 + 1) * 2 # 2 times the kaiser criteria for num components
+        num_components_kaiser = min(num_components_kaiser, self.data_dict['X_train'].shape[1]) # ensure we don't exceed the number of features
         self.pca_model = PCA(n_components=num_components_kaiser)
         self.data_dict['X_train'] = pd.DataFrame(self.pca_model.fit_transform(self.data_dict['X_train']), 
                                                 index=self.data_dict['y_train'].index)
@@ -225,12 +220,12 @@ class trainModel:
     #--- Classifiers ---#
     def train_classification_models(self, dense_grid):
         self.models = {}
-        self.tune_model_nnet(dense_grid)
+        # self.tune_model_nnet(dense_grid)
         self.tune_model_svm(dense_grid)
-        self.tune_model_logit()
-        self.tune_model_rf(dense_grid)
-        self.tune_model_gradient_boost(dense_grid)
-        self.fit_logistic_ensemble()
+        # self.tune_model_logit()
+        # self.tune_model_rf(dense_grid)
+        # self.tune_model_gradient_boost(dense_grid)
+        # self.fit_logistic_ensemble()
         self.save_best_models()
 
     def tune_model_nnet(self, dense_grid=False):
@@ -1188,8 +1183,10 @@ class trainModel:
         print('...complete\n')
 
 
-# WL_models = trainModel(dense_grid=True)
-PTS_models = trainModel(dense_grid=True,
-                                  target_response='PTS_per48',
-                                  model_type='regression')
+WL_models = trainModel(dense_grid=True,
+                       target_response='WL',
+                       model_type='classification')
+# PTS_models = trainModel(dense_grid=True,
+#                                   target_response='PTS_per48',
+#                                   model_type='regression')
 print("complete")

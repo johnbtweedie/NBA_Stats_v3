@@ -220,8 +220,8 @@ class AssembleModels:
 class AssembleFeatures:
     def __init__(self, conn=sqlite3.connect('nba_database.db'), for_custom_matchups=False):
         self.conn = conn
-        self.data = self.load_data('current_team_data')
-        self.prev_data = self.load_data('prev_team_data')
+        self.data = self.load_data('deployment_team_data')
+        self.prev_data = self.load_data('deployment_prev_matchup_data')
         self.for_custom_matchups = for_custom_matchups
 
     def load_data(self, db_table_name):

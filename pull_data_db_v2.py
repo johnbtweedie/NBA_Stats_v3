@@ -14,7 +14,7 @@ from curl_cffi.requests.exceptions import RequestException as CurlRequestExcepti
 
 class getData:
     '''
-    pull raw data from stats.nba.com and store it, untouched, in the database:
+    pull raw data from stats.nba.com and store it, untouched, in the database:f
         team_gamelogs   - one row per team per game
         player_gamelogs - one row per player per game (advanced box score)
     all feature generation happens downstream in process_data_v2.py
@@ -82,7 +82,7 @@ class getData:
 
         return None
 
-    def fetch_player_gamelog(self, game_id, max_retries=5, timeout=30):
+    def fetch_player_gamelog(self, game_id, max_retries=3, timeout=15):
         '''
         get every player's advanced box score for one game, retrying with exponential backoff on timeouts
         '''
@@ -98,6 +98,11 @@ class getData:
                 wait = min(2 ** attempt, 30) + random.uniform(0, 1)
                 print(f"   timed out (attempt {attempt + 1}/{max_retries}), retrying in {wait:.0f}s")
                 time.sleep(wait)
+            except AttributeError:
+                # the API returned a response with missing team stats (e.g. an in-progress,
+                # postponed, or exhibition game) - not a transient failure, so don't retry
+                print(f"   game {game_id} has no advanced box score data, skipping")
+                return pd.DataFrame()
 
         return None
 
@@ -206,19 +211,46 @@ class getData:
         print(f"Fetching player data for {len(game_ids)} games...")
         print("="*50)
 
+        # stats.nba.com appears to throttle sustained request rates by silently stalling
+        # connections (timeouts, not error codes) after a few hundred calls. so: pace
+        # requests, take a periodic breather, and if several games in a row time out,
+        # stop hammering it - cool down, open a fresh session, then resume
+        cooldown_every = 250
+        consecutive_failures = 0
+        cooldowns = 0
+        max_cooldowns = 3
+
         failed = []
+        saved = 0
         for n, game_id in enumerate(game_ids, start=1):
             df_player = self.fetch_player_gamelog(game_id)
             if df_player is None:
                 failed.append(game_id)
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    cooldowns += 1
+                    if cooldowns > max_cooldowns:
+                        print("   still timing out after repeated cooldowns - stopping; re-run later to resume")
+                        break
+                    print(f"   3 games in a row timed out, cooling down for 5 min (cooldown {cooldowns}/{max_cooldowns})")
+                    time.sleep(300)
+                    self.init_session()
+                    consecutive_failures = 0
             else:
-                df_player.to_sql('player_gamelogs', conn, if_exists='append', index=False)
+                consecutive_failures = 0
+                if not df_player.empty:
+                    df_player.to_sql('player_gamelogs', conn, if_exists='append', index=False)
+                    saved += 1
             if n % 50 == 0:
                 print(f"   {n}/{len(game_ids)} games")
-            time.sleep(random.uniform(0.3, 0.8))
+            if n % cooldown_every == 0:
+                pause = random.uniform(60, 120)
+                print(f"   pausing {pause:.0f}s to stay under the rate limit")
+                time.sleep(pause)
+            time.sleep(random.uniform(0.8, 1.6))
 
         print("="*50)
-        print(f"Player data complete. {len(game_ids) - len(failed)}/{len(game_ids)} games saved.")
+        print(f"Player data complete. {saved}/{len(game_ids)} games saved.")
         if failed:
             print(f"Failed game IDs (will be retried on the next run): {failed}")
         print("="*50)
