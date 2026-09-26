@@ -21,8 +21,11 @@ import seaborn as sns
 from sklearn.model_selection import GridSearchCV, StratifiedKFold
 import pandas as pd
 import time
-# Ignore all warnings
+import logging
+from run_log import RunLog, LOGGER_NAME
+# quiet by default; RunLog re-enables warnings while a run is in progress so they land in the log
 warnings.filterwarnings('ignore')
+logger = logging.getLogger(LOGGER_NAME)
 
 def model_classification_performance(y_test, y_pred, model_name, model_call):
     con_matrix = confusion_matrix(y_test, y_pred.round())
@@ -99,33 +102,38 @@ class trainModel:
                  dense_grid=True):
         
         self.conn = conn
+        self.run_log = RunLog(conn, response=target_response, model_type=model_type,
+                              settings={'scale': scale, 'pca': pca, 'dense_grid': dense_grid})
 
-        self.dataset = self.load_data('modeling_dataset')
-        self.process_features()
+        with self.run_log:
+            self.dataset = self.load_modeling_dataset()
+            self.select_features()
 
-        self.response = target_response
-        self.process_response(target_response)
+            self.response = target_response
+            self.select_response(target_response)
 
-        self.test_train_split()
-        self.scaler_used = False
-        self.pca_used = False
-        if scale:
-            self.scale_data()
-            self.scaler_used = True
-        if pca:
-            self.pca()
-            self.pca_used = True
+            self.partition_by_split_label()
+            self.run_log.log_dataset(self.features, self.responses,
+                                     self.dataset_split.loc[self.features.index], self.rows_dropped_for_nan)
+            self.scaler_used = False
+            self.pca_used = False
+            if scale:
+                self.scale_data()
+                self.scaler_used = True
+            if pca:
+                self.pca()
+                self.pca_used = True
 
-        if model_type == 'classification':
-            self.train_classification_models(dense_grid)
-        if model_type == 'regression':
-            self.train_regression_models(dense_grid)
+            if model_type == 'classification':
+                self.train_classification_models(dense_grid)
+            if model_type == 'regression':
+                self.train_regression_models(dense_grid)
         print('complete')
 
     #--- Preprocess ---#
-    def load_data(self, db_table_name):
+    def load_modeling_dataset(self, db_table_name='modeling_dataset'):
         '''
-        get features and responses from database
+        load the prebuilt modeling dataset (features, responses and split labels) from the database
         '''
         print(f'loading {db_table_name} from database...')
         df = pd.read_sql(f'SELECT * FROM {db_table_name}', self.conn)
@@ -134,15 +142,21 @@ class trainModel:
         print('...complete\n')
         return df
 
-    def process_features(self, feature_set='basic_v1', use_all=False):
+    def select_features(self, feature_set='basic_v2', use_all=False):
         '''
-        prune and process feature set
+        keep the columns of the chosen feature set, drop incomplete rows, and hold on to
+        each row's dataset_split label
         '''
-        print('processing feature data...')
+        print('selecting features...')
         feature_cols = pd.read_excel(r'NBA_Stats_v3/catalogs/parameters/feature_sets.xlsx',
                              sheet_name=feature_set)['feature_cols'].tolist()
         feature_cols = [col.strip().replace("'", "") for col in feature_cols]
+        rows_before = len(self.dataset)
         self.dataset = self.dataset.dropna()
+        self.rows_dropped_for_nan = rows_before - len(self.dataset)
+        missing = [c for c in feature_cols if c not in self.dataset.columns]
+        if missing:
+            logger.error(f"feature set '{feature_set}' lists {len(missing)} columns not in the dataset: {missing}")
         self.dataset_split = self.dataset['dataset_split']
         if not use_all:
             self.features = self.dataset[feature_cols]
@@ -150,18 +164,18 @@ class trainModel:
             self.features = self.dataset.drop(columns=['dataset_split'])
         print('...complete\n')
 
-    def process_response(self, target_response):
-        print('procesing response data...')
+    def select_response(self, target_response):
+        print('selecting response...')
         self.responses = self.dataset.loc[self.features.index, f'{target_response}_r']
         print('...complete\n')
 
-    def test_train_split(self, holdout=True):
+    def partition_by_split_label(self, holdout=True):
         '''
-        split into train/test/validation using the dataset_split column assigned by
-        build_datasets.py (chronological holdout for validation, random train/test split
-        of the remainder) rather than re-deriving the split here
+        distribute rows into the data dictionary according to the dataset_split labels
+        already assigned by build_datasets.py (chronological holdout for validation, random
+        train/test split of the remainder) - nothing is re-split here
         '''
-        print('segmenting test/train sets...')
+        print('partitioning data by split label...')
         self.holdout = holdout
         split = self.dataset_split.loc[self.features.index]
 
@@ -207,9 +221,12 @@ class trainModel:
         sorted_eigenvalues = np.sort(eigenvalues)[::-1]
         num_components_kaiser = sum(sorted_eigenvalues > 1 + 1) * 2 # 2 times the kaiser criteria for num components
         num_components_kaiser = min(num_components_kaiser, self.data_dict['X_train'].shape[1]) # ensure we don't exceed the number of features
+        print("using PCA with", num_components_kaiser, "components")
         self.pca_model = PCA(n_components=num_components_kaiser)
         self.data_dict['X_train'] = pd.DataFrame(self.pca_model.fit_transform(self.data_dict['X_train']), 
                                                 index=self.data_dict['y_train'].index)
+        logger.info(f'PCA kept {num_components_kaiser} components from {len(self.features.columns)} features, '
+                    f'explaining {self.pca_model.explained_variance_ratio_.sum():.1%} of the variance')
         self.data_dict['X_test'] = pd.DataFrame(self.pca_model.transform(self.data_dict['X_test']), 
                                                 index=self.data_dict['y_test'].index)
         if self.holdout:
@@ -220,12 +237,12 @@ class trainModel:
     #--- Classifiers ---#
     def train_classification_models(self, dense_grid):
         self.models = {}
-        # self.tune_model_nnet(dense_grid)
-        self.tune_model_svm(dense_grid)
-        # self.tune_model_logit()
+        self.tune_model_nnet(dense_grid)
+        # self.tune_model_svm(dense_grid)
+        self.tune_model_logit()
         # self.tune_model_rf(dense_grid)
         # self.tune_model_gradient_boost(dense_grid)
-        # self.fit_logistic_ensemble()
+        self.fit_logistic_ensemble()
         self.save_best_models()
 
     def tune_model_nnet(self, dense_grid=False):
@@ -1163,6 +1180,7 @@ class trainModel:
 
     def save_best_models(self):
         print('saving best models...')
+        self.run_log.log_models(self.models)
         datestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         model_filename = f'best_models_{self.response}_{datestamp}.pkl'
         save_data_dict = {'X_hold' : self.data_dict['X_hold'],
@@ -1180,10 +1198,11 @@ class trainModel:
         if self.pca_used:
             save_dict['pca'] = self.pca_model
         joblib.dump(save_dict, model_filename)
+        self.run_log.set_artifact(model_filename)
         print('...complete\n')
 
 
-WL_models = trainModel(dense_grid=True,
+WL_models = trainModel(dense_grid=False,
                        target_response='WL',
                        model_type='classification')
 # PTS_models = trainModel(dense_grid=True,

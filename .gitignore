@@ -9,4 +9,10 @@ venv/
 .venv/
 __pycache__/
 
-catalogs/.DS_Store
+NBA_Stats_v3/catalogs/.DS_Store
+logs/
+NBA_Stats_v3/catalogs/parameters/feature_sets.xlsx
+.gitignore
+catalogs/parameters/~$feature_sets.xlsx
+catalogs/parameters/feature_sets.xlsx
+catalogs/parameters/feature_sets.xlsx

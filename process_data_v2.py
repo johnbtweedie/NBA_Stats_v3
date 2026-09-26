@@ -11,11 +11,11 @@ from db_utils import upsert_to_sql
 
 warnings.filterwarnings('ignore')
 
-TEAM_ABVS = ['ATL', 'BOS', 'BRK', 'CHI', 'CHA', 'CLE', 'DAL', 'DEN', 'DET', 'GSW',
+TEAM_ABVS = ['ATL', 'BOS', 'BKN', 'CHI', 'CHA', 'CLE', 'DAL', 'DEN', 'DET', 'GSW',
              'HOU', 'IND', 'LAC', 'LAL', 'MEM', 'MIA', 'MIL', 'MIN', 'NOP', 'NYK',
              'OKC', 'ORL', 'PHI', 'PHX', 'POR', 'SAC', 'SAS', 'TOR', 'UTA', 'WAS']
 
-ARIMA_ORDERS_PATH = 'catalogs/parameters/arima_orders.pkl'
+ARIMA_ORDERS_PATH = 'NBA_Stats_v3/catalogs/parameters/arima_orders.pkl'
 ARIMA_ENDOG_COLS = ['OffRat', 'DefRat']
 
 class ComputeTeamFeatures:
@@ -521,7 +521,7 @@ class ComputeTeamFeatures:
         skips entirely if the optimal windows CSV hasn't been provided
         '''
         try:
-            optimal_windows = pd.read_csv(r'catalogs/parameters/rolling_average_windows.csv', index_col=0)
+            optimal_windows = pd.read_csv(r'NBA_Stats_v3/catalogs/parameters/rolling_average_windows.csv', index_col=0)
         except FileNotFoundError:
             print('no optimal rolling window file found, skipping optimal-window features')
             return df
@@ -593,7 +593,7 @@ class ComputeTeamFeatures:
         the exog inputs also include opponent-matched (_opp) versions of some trailing
         stats - fitted DFMs may condition a team's factors on their opponent's form
         '''
-        dfm_paths = ['catalogs/parameters/dfm_1.pkl', 'catalogs/parameters/dfm_2.pkl']
+        dfm_paths = ['NBA_Stats_v3/catalogs/parameters/dfm_1.pkl', 'NBA_Stats_v3/catalogs/parameters/dfm_2.pkl']
         dfms = []
         for dfm_path in dfm_paths:
             try:
@@ -794,7 +794,7 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
 
     def build_rotation_table(self, df, n=4, usage_stat_col='usagePercentage_ra8'):
         '''
-        compact (gameId, teamId)-indexed table of the top n rotation players' stats
+        compact (GAME_ID, TEAM_ABBREVIATION)-indexed table of the top n rotation players' stats
         (by rolling usage) for each team in each game, plus their aggregate mean -
         these are static, per-team-per-game features derived from player gamelogs,
         distinct from the full per-player rolling feature table
@@ -816,13 +816,20 @@ class ComputePlayerFeatures(ComputeTeamFeatures):
             return pd.Series(row)
 
         print(f'computing top {n} rotation stats...')
-        rotation = df.groupby(['gameId', 'teamId'], group_keys=True).apply(top_n_row)
+        rotation = df.groupby(['gameId', 'teamTricode'], group_keys=True).apply(top_n_row)
         print('...complete')
+
+        # key on the same (GAME_ID, TEAM_ABBREVIATION) as team_features so the two tables
+        # join directly - gameId is a zero-padded string in the raw player gamelogs
+        rotation.index = pd.MultiIndex.from_arrays(
+            [rotation.index.get_level_values('gameId').astype(int),
+             rotation.index.get_level_values('teamTricode')],
+            names=['GAME_ID', 'TEAM_ABBREVIATION'])
         return rotation
 
     def save_features(self):
         upsert_to_sql(self.features, self.conn, 'player_features', pk_cols=['gameId', 'teamId', 'personId'])
-        upsert_to_sql(self.rotation_features, self.conn, 'team_rotation_features', pk_cols=['gameId', 'teamId'])
+        upsert_to_sql(self.rotation_features, self.conn, 'team_rotation_features', pk_cols=['GAME_ID', 'TEAM_ABBREVIATION'])
 
 if __name__ == '__main__':
     print('computing features for player data...')
